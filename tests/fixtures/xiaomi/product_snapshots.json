@@ -1,0 +1,19 @@
+{
+  "schema": "device-price-browser-snapshots-v1",
+  "source_url": "https://www.mi.com/shop/buy/detail?product_id=91002",
+  "page_title": "Xiaomi Pad Fixture立即购买-小米商城",
+  "snapshots": [
+    {
+      "selections": {"version": "8GB+128GB", "color": "黑色"},
+      "html": "<div class=\"product-con\"><h2>Xiaomi Pad Fixture</h2><p class=\"sale-desc\">【至高享15%政府补贴，直播间下单赠保护壳】</p><div class=\"price-info\"><span class=\"current-price\">2999 元</span></div><div class=\"address-box\"><div class=\"desc\"><span>有现货</span></div></div></div>"
+    },
+    {
+      "selections": {"version": "8GB+256GB", "color": "冰晶蓝"},
+      "html": "<div class=\"product-con\"><h2>Xiaomi Pad Fixture</h2><div class=\"price-info\"><del class=\"market-price\">3499 元</del><span class=\"current-price\">3299 元</span></div><div class=\"address-box\"><div class=\"desc\"><span>有现货</span></div></div></div>"
+    },
+    {
+      "selections": {"version": "12GB+512GB 柔光版", "color": "松石绿"},
+      "html": "<div class=\"product-con\"><h2>Xiaomi Pad Fixture</h2><div class=\"price-info\"><span class=\"current-price\">3999 元</span></div><div class=\"address-box\"><div class=\"desc\"><span>暂时缺货</span></div></div></div>"
+    }
+  ]
+}

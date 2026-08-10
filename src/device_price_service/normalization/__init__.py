@@ -1,0 +1,1 @@
+"""Cross-brand normalization helpers."""
