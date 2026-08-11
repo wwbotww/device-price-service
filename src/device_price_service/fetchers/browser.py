@@ -61,6 +61,7 @@ class BrowserFetcher:
                         timeout=self.settings.browser_timeout_ms,
                     )
                     policy.validate(page.url)
+                    await page.wait_for_timeout(self.settings.browser_render_settle_ms)
                     body = (await page.content()).encode("utf-8")
                     if len(body) > self.settings.http_max_response_bytes:
                         raise ResponseTooLargeError(
@@ -194,13 +195,48 @@ class BrowserFetcher:
 
         dimension = plan.dimensions[dimension_index]
         container = self._dimension_container(page, dimension)
+        if await container.count() == 0:
+            if not dimension.optional:
+                # A preceding selection can remove an incompatible lower-level
+                # dimension from the DOM. That branch has no valid variant, but
+                # other branches must still be enumerated.
+                if dimension_index > 0:
+                    return
+                raise BrowserFetchError(f"variant dimension is missing: {dimension.name}")
+            await self._walk_dimensions(
+                page=page,
+                plan=plan,
+                dimension_index=dimension_index + 1,
+                snapshots=snapshots,
+                seen=seen,
+            )
+            return
         options = container.locator(dimension.option_selector)
         values = await self._option_values(options)
+        if not values:
+            if not dimension.optional:
+                if dimension_index > 0:
+                    return
+                raise BrowserFetchError(f"variant dimension is empty: {dimension.name}")
+            await self._walk_dimensions(
+                page=page,
+                plan=plan,
+                dimension_index=dimension_index + 1,
+                snapshots=snapshots,
+                seen=seen,
+            )
+            return
         excluded = set(dimension.excluded_values)
         for value in values:
             if value in excluded:
                 continue
+            # Variant clicks commonly re-render the whole option list. Re-resolve the
+            # container for every iteration and skip combinations removed by the page.
+            container = self._dimension_container(page, dimension)
+            options = container.locator(dimension.option_selector)
             option = options.filter(has_text=re.compile(rf"^\s*{re.escape(value)}\s*$")).first
+            if await option.count() == 0:
+                continue
             classes = (await option.get_attribute("class") or "").lower()
             aria_disabled = (await option.get_attribute("aria-disabled") or "").lower()
             if "disabled" in classes or aria_disabled == "true":
@@ -225,9 +261,13 @@ class BrowserFetcher:
 
     @staticmethod
     def _dimension_container(page: Page, dimension: BrowserVariantDimension) -> Locator:
-        return page.locator(dimension.container_selector).filter(
-            has_text=dimension.heading_text
-        ).first
+        headings = (
+            (dimension.heading_text,)
+            if isinstance(dimension.heading_text, str)
+            else dimension.heading_text
+        )
+        heading_pattern = re.compile("|".join(re.escape(heading) for heading in headings))
+        return page.locator(dimension.container_selector).filter(has_text=heading_pattern).first
 
     async def _active_selections(
         self,
@@ -237,7 +277,11 @@ class BrowserFetcher:
         selections: dict[str, str] = {}
         for dimension in dimensions:
             container = self._dimension_container(page, dimension)
+            if await container.count() == 0 and dimension.optional:
+                continue
             active = container.locator(f"{dimension.option_selector}.active").first
+            if await active.count() == 0 and dimension.optional:
+                continue
             value = (await active.get_attribute("title") or await active.inner_text()).strip()
             if not value:
                 raise BrowserFetchError(f"active variant is empty: {dimension.name}")
@@ -251,9 +295,7 @@ class BrowserFetcher:
         settle_ms: int,
     ) -> None:
         options = page.locator(fixed.container_selector).first.locator(fixed.option_selector)
-        option = options.filter(
-            has_text=re.compile(rf"^\s*{re.escape(fixed.value)}\s*$")
-        ).first
+        option = options.filter(has_text=re.compile(rf"^\s*{re.escape(fixed.value)}\s*$")).first
         await option.click(timeout=self.settings.browser_timeout_ms)
         await page.wait_for_timeout(settle_ms)
 

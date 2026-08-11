@@ -1,0 +1,10 @@
+{
+  "schema": "device-price-browser-snapshots-v1",
+  "source_url": "https://shop.vivo.com.cn/product/44001",
+  "snapshots": [
+    {
+      "selections": {"version": "12GB+256GB", "color": "辰夜黑"},
+      "html": "<main class='product-main' data-sku-id='140001'><h1 class='product-name'>vivo X Fixture Pro</h1><span class='current-price'>以旧换新到手价 ￥ 4,299</span><button>立即购买</button></main>"
+    }
+  ]
+}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from device_price_service.db.models import (
@@ -19,9 +21,11 @@ from device_price_service.db.models import (
     Sku,
 )
 from device_price_service.domain.enums import (
+    Availability,
     EntityType,
     FetchMethod,
     OperationStatus,
+    OriginalPriceType,
     RunStatus,
     RunType,
     TriggerType,
@@ -39,6 +43,14 @@ class OutOfOrderObservationError(RepositoryError):
 
 class InconsistentPriceStateError(RepositoryError):
     """Raised when current and history projections no longer agree."""
+
+
+@dataclass(frozen=True, slots=True)
+class MissingProductCandidate:
+    product_id: int
+    official_product_id: str
+    url: str
+    category_code: str
 
 
 class CatalogRepository:
@@ -200,6 +212,147 @@ class CatalogRepository:
         offer.consecutive_misses = 0
         offer.last_seen_at = max(offer.last_seen_at, observed_at)
         return offer
+
+    def current_prices_for_product(
+        self,
+        *,
+        brand_code: str,
+        channel_code: str,
+        official_product_id: str,
+    ) -> dict[str, Decimal]:
+        rows = self.session.execute(
+            select(Sku.spec_fingerprint, PriceCurrent.current_price)
+            .select_from(Product)
+            .join(Brand, Product.brand_id == Brand.id)
+            .join(Sku, Sku.product_id == Product.id)
+            .join(OfficialOffer, OfficialOffer.sku_id == Sku.id)
+            .join(SalesChannel, OfficialOffer.channel_id == SalesChannel.id)
+            .join(PriceCurrent, PriceCurrent.offer_id == OfficialOffer.id)
+            .where(
+                Brand.code == brand_code,
+                SalesChannel.code == channel_code,
+                Product.official_product_id == official_product_id,
+                PriceCurrent.current_price.is_not(None),
+            )
+        ).all()
+        return {
+            str(fingerprint): price for fingerprint, price in rows if isinstance(price, Decimal)
+        }
+
+    def active_product_count(self, channel_id: int) -> int:
+        return int(
+            self.session.scalar(
+                select(func.count(func.distinct(Product.id)))
+                .select_from(Product)
+                .join(Sku, Sku.product_id == Product.id)
+                .join(OfficialOffer, OfficialOffer.sku_id == Sku.id)
+                .where(
+                    OfficialOffer.channel_id == channel_id,
+                    OfficialOffer.availability != Availability.OFF_SHELF.value,
+                )
+            )
+            or 0
+        )
+
+    def register_missing_products(
+        self,
+        *,
+        channel_id: int,
+        seen_product_ids: set[str],
+        confirmation_runs: int,
+    ) -> list[MissingProductCandidate]:
+        query = (
+            select(Product, Category.code)
+            .distinct()
+            .join(Category, Product.category_id == Category.id)
+            .join(Sku, Sku.product_id == Product.id)
+            .join(OfficialOffer, OfficialOffer.sku_id == Sku.id)
+            .where(
+                OfficialOffer.channel_id == channel_id,
+                OfficialOffer.availability != Availability.OFF_SHELF.value,
+            )
+        )
+        if seen_product_ids:
+            query = query.where(Product.official_product_id.not_in(seen_product_ids))
+
+        candidates: list[MissingProductCandidate] = []
+        for product, category_code in self.session.execute(query).all():
+            offers = self.session.scalars(
+                select(OfficialOffer)
+                .join(Sku, OfficialOffer.sku_id == Sku.id)
+                .where(
+                    Sku.product_id == product.id,
+                    OfficialOffer.channel_id == channel_id,
+                    OfficialOffer.availability != Availability.OFF_SHELF.value,
+                )
+                .with_for_update()
+            ).all()
+            for offer in offers:
+                offer.consecutive_misses += 1
+            if offers and min(offer.consecutive_misses for offer in offers) >= confirmation_runs:
+                candidates.append(
+                    MissingProductCandidate(
+                        product_id=product.id,
+                        official_product_id=product.official_product_id,
+                        url=product.official_url,
+                        category_code=str(category_code),
+                    )
+                )
+        return candidates
+
+    def confirm_product_off_shelf(
+        self,
+        *,
+        product_id: int,
+        channel_id: int,
+        crawl_run_id: int,
+        observed_at: datetime,
+        source_hash: str,
+        confirmation_runs: int,
+    ) -> None:
+        product = self.session.scalar(
+            select(Product).where(Product.id == product_id).with_for_update()
+        )
+        if product is None:
+            raise RepositoryError(f"unknown product id: {product_id}")
+        product.lifecycle_status = "INACTIVE"
+
+        skus = self.session.scalars(
+            select(Sku).where(Sku.product_id == product_id).with_for_update()
+        ).all()
+        price_repository = PriceRepository(self.session)
+        for sku in skus:
+            sku.status = "INACTIVE"
+            offer = self.session.scalar(
+                select(OfficialOffer)
+                .where(
+                    OfficialOffer.sku_id == sku.id,
+                    OfficialOffer.channel_id == channel_id,
+                )
+                .with_for_update()
+            )
+            if offer is None:
+                continue
+            current = self.session.scalar(
+                select(PriceCurrent).where(PriceCurrent.offer_id == offer.id)
+            )
+            if current is not None:
+                price_repository.record(
+                    PriceObservation(
+                        offer_id=offer.id,
+                        crawl_run_id=crawl_run_id,
+                        currency=current.currency,
+                        original_price=current.original_price,
+                        original_price_type=OriginalPriceType(current.original_price_type),
+                        current_price=current.current_price,
+                        availability=Availability.OFF_SHELF,
+                        observed_at=max(observed_at, current.observed_at),
+                        source_hash=source_hash,
+                    )
+                )
+            else:
+                offer.availability = Availability.OFF_SHELF.value
+            offer.consecutive_misses = confirmation_runs
 
 
 class CrawlRunRepository:

@@ -25,6 +25,12 @@ def test_settings_rejects_reversed_delay_range() -> None:
         Settings(_env_file=None, http_min_delay_seconds=3, http_max_delay_seconds=1)
 
 
-def test_live_crawl_requires_approved_user_agent_contact() -> None:
-    with pytest.raises(ValidationError, match="approved company contact"):
-        Settings(_env_file=None, live_crawl_enabled=True)
+def test_live_crawl_accepts_anonymous_test_user_agent() -> None:
+    settings = Settings(_env_file=None, live_crawl_enabled=True)
+
+    assert settings.crawler_user_agent == "DevicePriceTestBot/1.0"
+
+
+def test_user_agent_cannot_be_empty() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, crawler_user_agent="")

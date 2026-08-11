@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from urllib.parse import urljoin, urlsplit
 
@@ -37,7 +38,7 @@ class AppleParseError(ValueError):
 class AppleAdapter(BrandAdapter):
     brand_code = "APPLE"
     channel_code = "APPLE_CN_WEB"
-    version = "apple-cn-html-v1"
+    version = "apple-cn-bootstrap-v2"
 
     def __init__(self, *, discovery_pages: tuple[tuple[str, str], ...] = APPLE_DISCOVERY_PAGES):
         self.discovery_pages = discovery_pages
@@ -82,11 +83,13 @@ class AppleAdapter(BrandAdapter):
             seen_parts.add(part_number)
 
             original = anchor.first(
-                lambda node: any(
-                    node.has_class(class_name)
-                    for class_name in ("original_price", "original-price", "previous_price")
+                lambda node: (
+                    any(
+                        node.has_class(class_name)
+                        for class_name in ("original_price", "original-price", "previous_price")
+                    )
+                    or node.tag in {"del", "s"}
                 )
-                or node.tag in {"del", "s"}
             )
             item_container = anchor.parent or anchor
             item_text = normalize_text(item_container.text())
@@ -108,8 +111,128 @@ class AppleAdapter(BrandAdapter):
             )
 
         if not skus:
+            skus = self._selection_skus(result)
+        if not skus:
             raise AppleParseError("Apple product page yielded no priced SKU")
         return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+
+    @classmethod
+    def _selection_skus(cls, result: FetchResult) -> list[dict[str, object]]:
+        try:
+            page = result.body.decode("utf-8")
+        except UnicodeDecodeError:
+            return []
+        marker = re.search(r"productSelectionData:\s*", page)
+        if marker is None:
+            return []
+        try:
+            data, _ = json.JSONDecoder().raw_decode(page, marker.end())
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        products = data.get("products")
+        main_values = data.get("mainDisplayValues")
+        if not isinstance(products, list) or not isinstance(main_values, dict):
+            return []
+        prices = main_values.get("prices")
+        if not isinstance(prices, dict):
+            return []
+
+        skus: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for product in products:
+            if not isinstance(product, dict):
+                continue
+            sku_id = normalize_text(
+                str(product.get("btrOrFdPartNumber") or product.get("aosContainerPartNumber") or "")
+            ).upper()
+            price_key = normalize_text(str(product.get("priceKey", "")))
+            price = prices.get(price_key)
+            if not sku_id or sku_id in seen or not isinstance(price, dict):
+                continue
+            current = price.get("currentPrice")
+            current_text = cls._bootstrap_price(current) or cls._bootstrap_price(
+                price.get("amount")
+            )
+            if current_text is None:
+                continue
+            seen.add(sku_id)
+            dimensions = cls._bootstrap_dimensions(product, main_values)
+            configuration = product.get("productConfiguration")
+            if isinstance(configuration, dict):
+                dimensions.update(
+                    {
+                        f"configuration_{normalize_text(str(key)).lower()}": normalize_text(
+                            str(value)
+                        )
+                        for key, value in configuration.items()
+                        if str(value).strip()
+                    }
+                )
+            original_text = cls._bootstrap_price(price.get("previousPrice"))
+            skus.append(
+                {
+                    "part_number": sku_id,
+                    "source_url": result.final_url,
+                    "dimensions": dimensions,
+                    "current_text": current_text,
+                    "original_text": original_text,
+                    "original_label": "Apple 划线原价" if original_text else None,
+                    "availability": (
+                        Availability.COMING_SOON
+                        if product.get("isComingSoon") is True
+                        else Availability.ON_SALE
+                    ).value,
+                }
+            )
+        return skus
+
+    @classmethod
+    def _bootstrap_dimensions(
+        cls,
+        product: dict[str, object],
+        main_values: dict[str, object],
+    ) -> dict[str, str]:
+        raw_dimensions = product.get("dimensions")
+        if not isinstance(raw_dimensions, dict):
+            return {}
+        dimensions: dict[str, str] = {}
+        for raw_key, raw_value in raw_dimensions.items():
+            key = normalize_text(str(raw_key))
+            value = normalize_text(str(raw_value))
+            choices = main_values.get(key)
+            choice = choices.get(value) if isinstance(choices, dict) else None
+            header = choice.get("header") if isinstance(choice, dict) else None
+            display_value = cls._html_text(header) or value
+            lower_key = key.lower()
+            if "dimensioncolor" in lower_key:
+                normalized_key = "color"
+            elif "dimensionscreensize" in lower_key or "dimensioncasesize" in lower_key:
+                normalized_key = "size"
+            elif "processor" in lower_key:
+                normalized_key = "processor"
+            else:
+                normalized_key = re.sub(r"[^a-z0-9]+", "_", lower_key).strip("_")
+            if normalized_key and display_value:
+                dimensions[normalized_key] = display_value
+        return dimensions
+
+    @staticmethod
+    def _html_text(value: object) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        primary_label = re.split(r"<(?:div|as-footnote)\b", value, maxsplit=1)[0]
+        return normalize_text(parse_html(primary_label).text()) or None
+
+    @staticmethod
+    def _bootstrap_price(value: object) -> str | None:
+        if isinstance(value, dict):
+            raw = value.get("raw_amount") or value.get("amount")
+            return normalize_text(str(raw)) if raw is not None else None
+        if isinstance(value, (int, float, str)) and str(value).strip():
+            return normalize_text(str(value))
+        return None
 
     def normalize(self, item: DiscoveredProduct, parsed: ParsedProduct) -> NormalizedProduct:
         category_code = item.category_code or self._category_from_url(
@@ -138,16 +261,12 @@ class AppleAdapter(BrandAdapter):
                 for key, value in raw_dimensions.items()
                 if str(value).strip()
             }
-            capacity = normalize_capacity(
-                dimensions.get("capacity") or dimensions.get("storage")
-            )
+            capacity = normalize_capacity(dimensions.get("capacity") or dimensions.get("storage"))
             memory = normalize_capacity(dimensions.get("memory"))
             color = dimensions.get("color")
             connectivity = dimensions.get("connectivity") or dimensions.get("network")
             size = (
-                dimensions.get("size")
-                or dimensions.get("screensize")
-                or dimensions.get("casesize")
+                dimensions.get("size") or dimensions.get("screensize") or dimensions.get("casesize")
             )
             original_text = self._optional_string(raw.get("original_text"))
             resolution = self.price_policy.resolve(
@@ -170,11 +289,14 @@ class AppleAdapter(BrandAdapter):
             }
             attributes["capacity"] = capacity
             attributes["memory"] = memory
+            display_dimensions = (
+                value for key, value in dimensions.items() if not key.startswith("configuration_")
+            )
             sku_name = " ".join(
                 part
                 for part in (
                     product_name,
-                    *dict.fromkeys(dimensions.values()),
+                    *dict.fromkeys(display_dimensions),
                     part_number,
                 )
                 if part

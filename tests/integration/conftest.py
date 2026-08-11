@@ -16,7 +16,14 @@ from device_price_service.db.session import create_database_engine, create_sessi
 def mysql_engine() -> Iterator[Engine]:
     if os.getenv("RUN_MYSQL_INTEGRATION") != "1":
         pytest.skip("set RUN_MYSQL_INTEGRATION=1 to run MySQL integration tests")
-    settings = Settings(_env_file=None, mysql_database="device_price_test")
+    settings = Settings(
+        _env_file=None,
+        mysql_host=os.getenv("TEST_MYSQL_HOST", "127.0.0.1"),
+        mysql_port=int(os.getenv("TEST_MYSQL_PORT", "3307")),
+        mysql_database=os.getenv("TEST_MYSQL_DATABASE", "device_price_test"),
+        mysql_user=os.getenv("TEST_MYSQL_USER", "device_price"),
+        mysql_password=os.getenv("TEST_MYSQL_PASSWORD", "device-price-local"),
+    )
     engine = create_database_engine(settings)
     yield engine
     engine.dispose()

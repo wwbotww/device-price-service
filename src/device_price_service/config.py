@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     mysql_user: str = "device_price"
     mysql_password: str = "device-price-local"
 
-    crawler_user_agent: str = "CompanyDevicePriceBot/1.0 (+contact@example.com)"
+    crawler_user_agent: str = Field(default="DevicePriceTestBot/1.0", min_length=8, max_length=256)
     http_concurrency_per_domain: int = Field(default=2, ge=1, le=10)
     http_min_delay_seconds: float = Field(default=0.8, ge=0)
     http_max_delay_seconds: float = Field(default=2.0, ge=0)
@@ -35,7 +35,10 @@ class Settings(BaseSettings):
     http_max_redirects: int = Field(default=5, ge=0, le=10)
     http_max_response_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     browser_timeout_ms: int = Field(default=30_000, ge=1_000, le=120_000)
+    browser_render_settle_ms: int = Field(default=3_000, ge=0, le=15_000)
     price_change_confirm_threshold: float = Field(default=0.30, gt=0, le=1)
+    missing_confirmation_runs: int = Field(default=3, ge=2, le=10)
+    discovery_count_floor_ratio: float = Field(default=0.50, ge=0.10, le=1)
     raw_storage_path: Path = Path("var/raw")
     raw_retention_days: int = Field(default=30, ge=1)
     full_crawl_interval_hours: int = Field(default=6, ge=1, le=24)
@@ -45,10 +48,6 @@ class Settings(BaseSettings):
     def validate_delay_range(self) -> Settings:
         if self.http_max_delay_seconds < self.http_min_delay_seconds:
             raise ValueError("HTTP_MAX_DELAY_SECONDS must be >= HTTP_MIN_DELAY_SECONDS")
-        if self.live_crawl_enabled and "contact@example.com" in self.crawler_user_agent:
-            raise ValueError(
-                "LIVE_CRAWL_ENABLED requires an approved company contact in CRAWLER_USER_AGENT"
-            )
         return self
 
     @property

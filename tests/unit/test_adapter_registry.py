@@ -45,9 +45,12 @@ def test_registry_reports_missing_adapter() -> None:
         AdapterRegistry().get("MISSING")
 
 
-def test_builtin_registry_contains_phase_3_brands() -> None:
+def test_builtin_registry_contains_phase_4_brands() -> None:
     registry = build_builtin_registry()
 
-    assert len(registry) == 2
+    assert len(registry) == 5
     assert registry.get_by_brand("apple").channel_code == "APPLE_CN_WEB"
+    assert registry.get_by_brand("huawei").channel_code == "HUAWEI_CN_WEB"
     assert registry.get_by_brand("xiaomi").channel_code == "XIAOMI_CN_WEB"
+    assert registry.get_by_brand("oppo").channel_code == "OPPO_CN_WEB"
+    assert registry.get_by_brand("vivo").channel_code == "VIVO_CN_WEB"

@@ -40,9 +40,10 @@ class FetchResult:
 class BrowserVariantDimension:
     name: str
     container_selector: str
-    heading_text: str
+    heading_text: str | tuple[str, ...]
     option_selector: str = "li"
     excluded_values: tuple[str, ...] = ()
+    optional: bool = False
 
 
 @dataclass(frozen=True, slots=True)

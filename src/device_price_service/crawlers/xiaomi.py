@@ -7,7 +7,6 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 from device_price_service.crawlers.base import AdapterContext, BrandAdapter
 from device_price_service.crawlers.html import parse_html
 from device_price_service.domain.crawl import (
-    BrowserFixedOption,
     BrowserSnapshotPlan,
     BrowserVariantDimension,
     DiscoveredProduct,
@@ -31,17 +30,17 @@ XIAOMI_SNAPSHOT_PLAN = BrowserSnapshotPlan(
     snapshot_selector=".product-con",
     dimensions=(
         BrowserVariantDimension(
-            name="version",
-            container_selector=".buy-option .option-box",
-            heading_text="选择版本",
-        ),
-        BrowserVariantDimension(
             name="color",
             container_selector=".buy-option .option-box",
             heading_text="选择颜色",
         ),
+        BrowserVariantDimension(
+            name="version",
+            container_selector=".buy-option .option-box",
+            heading_text=("选择规格", "选择版本"),
+            optional=True,
+        ),
     ),
-    fixed_options=(BrowserFixedOption(container_selector=".batch-box", value="标准版"),),
     settle_ms=350,
     max_snapshots=96,
 )
@@ -54,7 +53,7 @@ class XiaomiParseError(ValueError):
 class XiaomiAdapter(BrandAdapter):
     brand_code = "XIAOMI"
     channel_code = "XIAOMI_CN_WEB"
-    version = "xiaomi-cn-rendered-v1"
+    version = "xiaomi-cn-rendered-v2"
 
     def __init__(self, *, discovery_url: str = XIAOMI_SHOP_URL) -> None:
         self.discovery_url = discovery_url
@@ -107,8 +106,8 @@ class XiaomiAdapter(BrandAdapter):
                 raise XiaomiParseError("Xiaomi snapshot fields are invalid")
             version = normalize_text(str(selections.get("version", "")))
             color = normalize_text(str(selections.get("color", "")))
-            if not version or not color:
-                raise XiaomiParseError("Xiaomi snapshot is missing version or color")
+            if not color:
+                raise XiaomiParseError("Xiaomi snapshot is missing color")
             key = (version, color)
             if key in seen_specs:
                 continue
@@ -125,19 +124,26 @@ class XiaomiAdapter(BrandAdapter):
                 raise XiaomiParseError("Xiaomi variant snapshots contain different products")
 
             original_node = price_box.first(
-                lambda node: node.tag in {"del", "s"}
-                or node.has_class("original-price")
-                or node.has_class("market-price")
+                lambda node: (
+                    node.tag in {"del", "s"}
+                    or node.has_class("original-price")
+                    or node.has_class("market-price")
+                )
             )
             current_node = price_box.first(lambda node: node.has_class("current-price"))
             if current_node is None:
                 current_node = price_box.first(
-                    lambda node: node.tag in {"span", "strong"}
-                    and not node.has_class("original-price")
-                    and not node.has_class("market-price")
+                    lambda node: (
+                        node.tag in {"span", "strong"}
+                        and not node.has_class("original-price")
+                        and not node.has_class("market-price")
+                    )
                 )
             if current_node is None:
                 raise XiaomiParseError("Xiaomi variant has no direct current price")
+            current_text = normalize_text(" ".join(current_node.text_parts))
+            if not current_text:
+                current_text = normalize_text(current_node.text())
 
             stock_node = root.first(lambda node: node.has_class("address-box"))
             stock_text = normalize_text(stock_node.text()) if stock_node else ""
@@ -145,7 +151,7 @@ class XiaomiAdapter(BrandAdapter):
                 {
                     "version": version,
                     "color": color,
-                    "current_text": normalize_text(current_node.text()),
+                    "current_text": current_text,
                     "original_text": normalize_text(original_node.text())
                     if original_node
                     else None,
@@ -288,8 +294,10 @@ class XiaomiAdapter(BrandAdapter):
 
     @staticmethod
     def _version_attributes(version: str) -> tuple[str | None, str | None, str | None]:
+        if not version:
+            return None, None, None
         match = re.search(
-            r"(?P<memory>\d+\s*GB)\s*\+\s*(?P<capacity>\d+\s*(?:GB|TB))",
+            r"(?P<memory>\d+\s*GB)\s*(?:\+|/)\s*(?P<capacity>\d+\s*(?:GB|TB))",
             version,
             re.I,
         )
@@ -297,7 +305,12 @@ class XiaomiAdapter(BrandAdapter):
             return None, None, version
         memory = normalize_capacity(match.group("memory"))
         capacity = normalize_capacity(match.group("capacity"))
-        edition = normalize_text(version[match.end() :]) or None
+        edition = (
+            normalize_text(
+                f"{version[: match.start()].strip(' /+')} {version[match.end() :].strip(' /+')}"
+            )
+            or None
+        )
         return memory, capacity, edition
 
     @staticmethod

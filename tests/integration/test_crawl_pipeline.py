@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,6 +15,7 @@ from device_price_service.crawlers.registry import AdapterRegistry
 from device_price_service.db.models import (
     CrawlRecord,
     CrawlRun,
+    OfficialOffer,
     PriceCurrent,
     PriceHistory,
     Product,
@@ -117,6 +118,61 @@ class FixtureAdapter(BrandAdapter):
         )
 
 
+class SequencePriceFetcher:
+    def __init__(self, prices: list[str]) -> None:
+        self.prices = prices
+        self.calls = 0
+
+    async def fetch(self, url: str, *, allowed_domains: list[str]) -> FetchResult:
+        assert url == PRODUCT_URL
+        assert "www.apple.com.cn" in allowed_domains
+        price = self.prices[self.calls]
+        fetched_at = datetime(2026, 8, 8, 8) + timedelta(minutes=self.calls)
+        self.calls += 1
+        body = json.dumps({"name": "Fixture Phone", "sku": "fixture-256", "price": price}).encode()
+        return FetchResult(
+            request_url=url,
+            final_url=url,
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=body,
+            fetched_at=fetched_at,
+            duration_ms=20,
+            fetch_method=FetchMethod.HTTP,
+        )
+
+
+class MutableDiscoveryAdapter(FixtureAdapter):
+    def __init__(self) -> None:
+        self.visible = True
+
+    async def discover(self, context: AdapterContext) -> list[DiscoveredProduct]:
+        if not self.visible:
+            return []
+        return await super().discover(context)
+
+
+class MissingDetailFetcher(StaticFetcher):
+    def __init__(self) -> None:
+        self.missing = False
+        self.calls = 0
+
+    async def fetch(self, url: str, *, allowed_domains: list[str]) -> FetchResult:
+        self.calls += 1
+        if not self.missing:
+            return await super().fetch(url, allowed_domains=allowed_domains)
+        return FetchResult(
+            request_url=url,
+            final_url=url,
+            status_code=404,
+            headers={"content-type": "text/html"},
+            body=b"fixture product not found",
+            fetched_at=datetime(2026, 8, 9, 8) + timedelta(minutes=self.calls),
+            duration_ms=10,
+            fetch_method=FetchMethod.HTTP,
+        )
+
+
 def test_fixture_adapter_runs_full_pipeline_and_replays(
     mysql_engine: object,
     session_factory: sessionmaker[Session],
@@ -181,3 +237,107 @@ def test_fixture_adapter_runs_full_pipeline_and_replays(
     ).replay(record_id)
     assert replay.validation.is_valid
     assert replay.product.official_product_id == "fixture-phone"
+
+
+def test_large_price_change_requires_two_matching_observations(
+    mysql_engine: object,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    with session_factory.begin() as session:
+        seed_reference_data(session)
+
+    fetcher = SequencePriceFetcher(["8999.00", "3999.00", "4999.00", "3999.00", "3999.00"])
+    pipeline = CrawlPipeline(
+        engine=mysql_engine,  # type: ignore[arg-type]
+        session_factory=session_factory,
+        http_fetcher=fetcher,
+        browser_fetcher=fetcher,
+        artifact_store=RawArtifactStore(tmp_path / "raw"),
+        validator=QualityValidator(price_change_threshold=0.3),
+    )
+    adapter = FixtureAdapter()
+
+    first = asyncio.run(pipeline.run(adapter))
+    rejected = asyncio.run(pipeline.run(adapter))
+    assert first.success_count == 1
+    assert rejected.failed_count == 1
+    with session_factory() as session:
+        current = session.scalar(select(PriceCurrent))
+        assert current is not None
+        assert current.current_price == Decimal("8999.00")
+        assert session.scalar(select(func.count()).select_from(PriceHistory)) == 1
+        rejected_codes = set(
+            session.scalars(
+                select(CrawlRecord.error_code).where(
+                    CrawlRecord.crawl_run_id == rejected.crawl_run_id
+                )
+            ).all()
+        )
+        assert rejected_codes == {
+            "LARGE_PRICE_CHANGE_RECHECK",
+            "LARGE_PRICE_CHANGE_UNCONFIRMED",
+        }
+
+    confirmed = asyncio.run(pipeline.run(adapter))
+    assert confirmed.success_count == 1
+    assert confirmed.failed_count == 0
+    with session_factory() as session:
+        current = session.scalar(select(PriceCurrent))
+        assert current is not None
+        assert current.current_price == Decimal("3999.00")
+        assert session.scalar(select(func.count()).select_from(PriceHistory)) == 2
+
+
+def test_missing_product_requires_three_runs_and_detail_404_confirmation(
+    mysql_engine: object,
+    session_factory: sessionmaker[Session],
+    tmp_path: Path,
+) -> None:
+    with session_factory.begin() as session:
+        seed_reference_data(session)
+
+    fetcher = MissingDetailFetcher()
+    adapter = MutableDiscoveryAdapter()
+    pipeline = CrawlPipeline(
+        engine=mysql_engine,  # type: ignore[arg-type]
+        session_factory=session_factory,
+        http_fetcher=fetcher,
+        browser_fetcher=fetcher,
+        artifact_store=RawArtifactStore(tmp_path / "raw"),
+        validator=QualityValidator(price_change_threshold=0.3),
+        missing_confirmation_runs=3,
+    )
+    assert asyncio.run(pipeline.run(adapter)).success_count == 1
+
+    adapter.visible = False
+    fetcher.missing = True
+    first_missing = asyncio.run(pipeline.run(adapter))
+    second_missing = asyncio.run(pipeline.run(adapter))
+    with session_factory() as session:
+        offer = session.scalar(select(OfficialOffer))
+        assert offer is not None
+        assert offer.consecutive_misses == 2
+        assert offer.availability == "ON_SALE"
+    third_missing = asyncio.run(pipeline.run(adapter))
+
+    assert first_missing.failed_count == 1
+    assert second_missing.failed_count == 1
+    assert third_missing.failed_count == 1
+    with session_factory() as session:
+        product = session.scalar(select(Product))
+        offer = session.scalar(select(OfficialOffer))
+        current = session.scalar(select(PriceCurrent))
+        histories = session.scalars(select(PriceHistory).order_by(PriceHistory.valid_from)).all()
+        assert product is not None and product.lifecycle_status == "INACTIVE"
+        assert offer is not None and offer.availability == "OFF_SHELF"
+        assert offer.consecutive_misses == 3
+        assert current is not None and current.current_price == Decimal("8999.00")
+        assert [history.availability for history in histories] == ["ON_SALE", "OFF_SHELF"]
+        confirmation = session.scalar(
+            select(CrawlRecord).where(
+                CrawlRecord.crawl_run_id == third_missing.crawl_run_id,
+                CrawlRecord.error_code == "OFF_SHELF_CONFIRMED",
+            )
+        )
+        assert confirmation is not None

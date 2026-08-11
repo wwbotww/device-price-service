@@ -54,7 +54,7 @@ CHANNELS = (
         "HUAWEI_CN_WEB",
         "华为商城",
         "https://www.vmall.com/",
-        ["www.vmall.com"],
+        ["www.vmall.com", "m.vmall.com", "item.vmall.com", "openapi.vmall.com"],
     ),
     ChannelSeed(
         "XIAOMI",

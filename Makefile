@@ -1,4 +1,4 @@
-.PHONY: setup browser-install db-up db-down migrate seed test test-unit test-integration lint format db-check adapters crawl replay scheduler
+.PHONY: setup browser-install db-up db-down mysql57-up mysql57-down migrate seed test test-unit test-integration test-integration-mysql57 lint format db-check db-audit adapters crawl replay scheduler
 
 setup:
 	uv sync
@@ -12,6 +12,12 @@ db-up:
 db-down:
 	docker compose down
 
+mysql57-up:
+	docker compose -f docker-compose.mysql57.yml up -d mysql57
+
+mysql57-down:
+	docker compose -f docker-compose.mysql57.yml down
+
 migrate:
 	uv run alembic upgrade head
 
@@ -20,6 +26,9 @@ seed:
 
 db-check:
 	uv run device-price db check
+
+db-audit:
+	uv run device-price db audit
 
 adapters:
 	uv run device-price adapters
@@ -41,6 +50,9 @@ test-unit:
 
 test-integration:
 	uv run pytest -m integration
+
+test-integration-mysql57:
+	RUN_MYSQL_INTEGRATION=1 TEST_MYSQL_PORT=3308 uv run pytest -m integration
 
 lint:
 	uv run ruff check .

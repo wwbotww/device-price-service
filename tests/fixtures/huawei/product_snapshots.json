@@ -1,0 +1,14 @@
+{
+  "schema": "device-price-browser-snapshots-v1",
+  "source_url": "https://www.vmall.com/product/42002.html",
+  "snapshots": [
+    {
+      "selections": {"version": "WiFi 8GB+256GB", "color": "星云灰"},
+      "html": "<section class='product-meta' data-sku-id='HW-42002-8256-G'><h1 class='product-name'>HUAWEI MatePad Fixture</h1><div class='marketing'>国补专区 以旧换新补贴</div><div class='current-price'>¥ 2,999</div><button>立即购买</button></section>"
+    },
+    {
+      "selections": {"version": "WiFi 12GB+512GB", "color": "星海蓝"},
+      "html": "<section class='product-meta' data-sku-id='HW-42002-12512-B'><h1 class='product-name'>HUAWEI MatePad Fixture</h1><del class='original-price'>¥ 4,299</del><div class='current-price'>¥ 3,999</div><button>暂时缺货</button></section>"
+    }
+  ]
+}

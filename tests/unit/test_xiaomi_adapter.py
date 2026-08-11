@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -43,12 +44,59 @@ def test_xiaomi_discovers_only_core_xiaomi_devices() -> None:
     ]
 
 
-def test_xiaomi_snapshot_plan_excludes_bundles_and_services() -> None:
+def test_xiaomi_snapshot_plan_enumerates_only_device_specs_and_colors() -> None:
     assert [dimension.name for dimension in XIAOMI_SNAPSHOT_PLAN.dimensions] == [
-        "version",
         "color",
+        "version",
     ]
-    assert [option.value for option in XIAOMI_SNAPSHOT_PLAN.fixed_options] == ["标准版"]
+    assert XIAOMI_SNAPSHOT_PLAN.fixed_options == ()
+    assert XIAOMI_SNAPSHOT_PLAN.dimensions[1].heading_text == ("选择规格", "选择版本")
+    assert XIAOMI_SNAPSHOT_PLAN.dimensions[1].optional is True
+
+
+def test_xiaomi_parses_current_slash_separated_laptop_spec() -> None:
+    assert XiaomiAdapter._version_attributes("Ultra5-325/24GB/1TB") == (
+        "24GB",
+        "1TB",
+        "Ultra5-325",
+    )
+
+
+def test_xiaomi_accepts_single_spec_device_without_version_dimension() -> None:
+    html = (
+        "<div class='product-con'><h2>Xiaomi Watch S5</h2>"
+        "<div class='price-info'><span class='current-price'>1299</span></div></div>"
+    )
+    body = json.dumps(
+        {
+            "schema": "device-price-browser-snapshots-v1",
+            "source_url": "https://www.mi.com/shop/buy/detail?product_id=91005",
+            "snapshots": [{"selections": {"color": "黑色"}, "html": html}],
+        },
+        ensure_ascii=False,
+    ).encode()
+    result = FetchResult(
+        request_url=PRODUCT_URL,
+        final_url=PRODUCT_URL,
+        status_code=200,
+        headers={"content-type": "application/json"},
+        body=body,
+        fetched_at=datetime(2026, 8, 11, 8),
+        duration_ms=5,
+        fetch_method=FetchMethod.REPLAY,
+    )
+    item = DiscoveredProduct(
+        official_product_id="91005",
+        url=PRODUCT_URL,
+        category_code="WATCH",
+    )
+    adapter = XiaomiAdapter()
+
+    product = adapter.normalize(item, adapter.parse_product(item, result))
+
+    assert product.skus[0].color == "黑色"
+    assert product.skus[0].attributes["version"] == ""
+    assert product.skus[0].offers[0].current_price == Decimal("1299.00")
 
 
 def test_xiaomi_parses_and_normalizes_rendered_variant_snapshots() -> None:

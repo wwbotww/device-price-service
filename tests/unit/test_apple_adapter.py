@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -70,10 +71,7 @@ def test_apple_parses_and_normalizes_direct_sku_prices() -> None:
     assert product.skus[0].offers[0].current_price == Decimal("8999.00")
     assert product.skus[0].offers[0].original_price is None
     assert product.skus[1].offers[0].original_price == Decimal("10999.00")
-    assert (
-        product.skus[1].offers[0].original_price_type
-        is OriginalPriceType.EXPLICIT_ORIGINAL
-    )
+    assert product.skus[1].offers[0].original_price_type is OriginalPriceType.EXPLICIT_ORIGINAL
     assert product.skus[2].offers[0].availability is Availability.OUT_OF_STOCK
     assert len({sku.spec_fingerprint for sku in product.skus}) == 3
 
@@ -109,3 +107,60 @@ def test_apple_preserves_cross_category_configuration_dimensions() -> None:
     assert sku.capacity == "512GB"
     assert sku.size == "14 英寸"
     assert sku.attributes["processor"] == "Fixture Pro 芯片"
+
+
+def test_apple_parses_exact_preselected_configuration_from_bootstrap() -> None:
+    url = "https://www.apple.com.cn/shop/buy-mac/macbook-air"
+    selection = {
+        "products": [
+            {
+                "aosContainerPartNumber": "RO_MBA_FIXTURE",
+                "priceKey": "13inch-midnight",
+                "isComingSoon": False,
+                "dimensions": {
+                    "chassis-dimensionScreensize": "13inch",
+                    "chassis-dimensionColor": "midnight",
+                },
+                "productConfiguration": {"memory": "MEM16", "storage": "SSD512"},
+            }
+        ],
+        "mainDisplayValues": {
+            "chassis-dimensionScreensize": {"13inch": {"header": "13 英寸"}},
+            "chassis-dimensionColor": {"midnight": {"header": "午夜色"}},
+            "prices": {
+                "13inch-midnight": {
+                    "currentPrice": {"raw_amount": "9999.00"},
+                    "previousPrice": None,
+                }
+            },
+        },
+    }
+    html = (
+        "<html><h1>购买 MacBook Air</h1><script>"
+        "window.PRODUCT_SELECTION_BOOTSTRAP = {productSelectionData: "
+        f"{json.dumps(selection, ensure_ascii=False)}}};</script></html>"
+    )
+    result = FetchResult(
+        request_url=url,
+        final_url=url,
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=html.encode(),
+        fetched_at=datetime(2026, 8, 11, 8),
+        duration_ms=5,
+        fetch_method=FetchMethod.REPLAY,
+    )
+    item = DiscoveredProduct(
+        official_product_id="macbook-air",
+        url=url,
+        category_code="LAPTOP",
+    )
+    adapter = AppleAdapter()
+
+    product = adapter.normalize(item, adapter.parse_product(item, result))
+
+    assert product.skus[0].official_sku_id == "RO_MBA_FIXTURE"
+    assert product.skus[0].size == "13 英寸"
+    assert product.skus[0].color == "午夜色"
+    assert product.skus[0].attributes["configuration_memory"] == "MEM16"
+    assert product.skus[0].offers[0].current_price == Decimal("9999.00")

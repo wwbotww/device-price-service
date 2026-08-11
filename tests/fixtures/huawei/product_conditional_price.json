@@ -1,0 +1,10 @@
+{
+  "schema": "device-price-browser-snapshots-v1",
+  "source_url": "https://www.vmall.com/product/42002.html",
+  "snapshots": [
+    {
+      "selections": {"version": "WiFi 8GB+256GB", "color": "星云灰"},
+      "html": "<section class='product-meta' data-sku-id='HW-42002-8256-G'><h1 class='product-name'>HUAWEI MatePad Fixture</h1><div class='current-price'>国补到手价 ¥ 2,499</div><button>立即购买</button></section>"
+    }
+  ]
+}

@@ -7,15 +7,18 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from device_price_service.config import Settings, get_settings
+from device_price_service.db.mysql_compat import install_mysql_connection_guards
 
 
 def create_database_engine(settings: Settings | None = None) -> Engine:
     resolved = settings or get_settings()
-    return create_engine(
+    engine = create_engine(
         resolved.sqlalchemy_url,
         pool_pre_ping=True,
         pool_recycle=1800,
     )
+    install_mysql_connection_guards(engine)
+    return engine
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

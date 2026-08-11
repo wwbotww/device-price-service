@@ -1,0 +1,10 @@
+{
+  "schema": "device-price-browser-snapshots-v1",
+  "source_url": "https://www.opposhop.cn/cn/web/products/43001.html",
+  "snapshots": [
+    {
+      "selections": {"version": "12GB+256GB", "color": "曜石黑"},
+      "html": "<main class='product-detail' data-sku-id='OP-43001-12256-K'><h1 class='product-name'>OPPO Find Fixture Pro</h1><span class='current-price'>券后价 ￥ 5,499</span><button>立即购买</button></main>"
+    }
+  ]
+}

@@ -1,8 +1,8 @@
 # 设备官方价格采集项目：构建及实施方案
 
-> 文档状态：V1 基准方案；阶段 0 技术基线、阶段 1、阶段 2 已完成；阶段 3 开发已完成、生产验收待门禁  
-> 最后更新：2026-08-05  
-> 适用范围：项目设计、开发、测试、部署和验收  
+> 文档状态：V1 基准方案；阶段 0～5 工程开发和最终验收已完成；Apple Watch 组合总价为已知限制
+> 最后更新：2026-08-11
+> 适用范围：项目设计、开发、测试、部署和验收
 > 变更原则：价格口径、表结构、官方渠道范围发生变化时，代码修改前先更新本文档
 
 ## 1. 项目目标
@@ -32,14 +32,14 @@ V1 的完成标准不是“能抓到页面上的一个价格”，而是：
 | 粒度 | 可销售 SKU，例如容量、内存、颜色、网络版本组合 |
 | 价格 | 页面明确展示的原价、当前无条件直接购买售价 |
 | 状态 | 在售、缺货、预约、未开售、下架等 |
-| 存储 | MySQL 8.x |
+| 存储 | 公司环境 MySQL 5.7.36；同时保持 MySQL 8.x 兼容 |
 
 V1 官方渠道白名单：
 
 | 品牌 | 允许域名/路径 | 说明 |
 | --- | --- | --- |
 | Apple | `www.apple.com.cn/shop/` | Apple 中国大陆在线商店 |
-| 华为 | `www.vmall.com/` | 华为商城自营渠道 |
+| 华为 | `www.vmall.com/`、`m.vmall.com/`、`item.vmall.com/`、`openapi.vmall.com/` | 华为商城页面、商品详情与页面公开内容接口 |
 | 小米 | `www.mi.com/shop/` | 小米中国大陆商城 |
 | OPPO | `www.opposhop.cn/` | 只采集 OPPO 商城，不跟随京东、天猫等外链 |
 | vivo | `shop.vivo.com.cn/` | vivo 中国大陆官方商城 |
@@ -641,7 +641,7 @@ MYSQL_PORT=3306
 MYSQL_DATABASE=device_price
 MYSQL_USER=device_price
 MYSQL_PASSWORD=change-me
-CRAWLER_USER_AGENT=CompanyDevicePriceBot/1.0 (+contact@example.com)
+CRAWLER_USER_AGENT=DevicePriceTestBot/1.0
 HTTP_CONCURRENCY_PER_DOMAIN=2
 HTTP_MIN_DELAY_SECONDS=0.8
 HTTP_MAX_DELAY_SECONDS=2.0
@@ -801,7 +801,7 @@ adapter 页面规则变更也按正式发布处理，不允许在生产容器内
 - 五个官方渠道白名单确认；
 - robots、商城条款和公司内部合规意见留档；
 - 子品牌排除范围确认；
-- 采集频率和 User-Agent 联系方式确认。
+- 采集频率和匿名测试 User-Agent 确认。
 
 退出条件：不存在会改变数据模型或采集授权的未决问题。
 
@@ -843,6 +843,8 @@ adapter 页面规则变更也按正式发布处理，不允许在生产容器内
 
 ### 阶段 4：华为、OPPO、vivo 适配器
 
+> 当前状态：三个 adapter、脱敏 fixture、五品牌注册入口和三品牌 MySQL 双周期入库重放已完成；真实 smoke test、人工价格抽查和生产调度验收待阶段 0 授权。
+
 逐品牌完成发现、详情解析、SKU 和价格策略；每完成一个品牌单独上线验证，不等待三个品牌一起发布。
 
 重点：
@@ -854,6 +856,8 @@ adapter 页面规则变更也按正式发布处理，不允许在生产容器内
 退出条件：五品牌均达到单品牌验收标准。
 
 ### 阶段 5：稳定性和正式验收
+
+> 当前状态：稳定性保护、只读巡检、运行手册、双版本数据库验收、公司 `device_price` 部署和真实商城全量验收已完成；四品牌全量成功，Apple 手机、平板和电脑成功，Watch 完整组合总价待官方 summary 接口适配。
 
 工作项：
 

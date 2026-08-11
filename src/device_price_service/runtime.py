@@ -44,10 +44,10 @@ def build_runtime(settings: Settings | None = None) -> ApplicationRuntime:
         http_fetcher=http_fetcher,
         browser_fetcher=browser_fetcher,
         artifact_store=RawArtifactStore(resolved.raw_storage_path),
-        validator=QualityValidator(
-            price_change_threshold=resolved.price_change_confirm_threshold
-        ),
+        validator=QualityValidator(price_change_threshold=resolved.price_change_confirm_threshold),
         stale_run_after_minutes=resolved.crawl_stale_after_minutes,
+        missing_confirmation_runs=resolved.missing_confirmation_runs,
+        discovery_count_floor_ratio=resolved.discovery_count_floor_ratio,
     )
     return ApplicationRuntime(
         settings=resolved,
