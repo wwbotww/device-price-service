@@ -1,10 +1,15 @@
 import asyncio
+import ssl
 
 import httpx
 import pytest
 
 from device_price_service.config import Settings
-from device_price_service.fetchers.http import HttpFetcher, ResponseTooLargeError
+from device_price_service.fetchers.http import (
+    HttpFetcher,
+    ResponseTooLargeError,
+    _tls12_compat_context,
+)
 from device_price_service.fetchers.url_policy import UrlPolicyError
 
 
@@ -74,3 +79,15 @@ def test_http_fetcher_rejects_oversized_response() -> None:
                 )
 
     asyncio.run(run())
+
+
+def test_tls12_compat_profile_keeps_verification_and_one_explicit_cipher() -> None:
+    context = _tls12_compat_context()
+
+    assert context.verify_mode is ssl.CERT_REQUIRED
+    assert context.check_hostname is True
+    assert context.minimum_version is ssl.TLSVersion.TLSv1_2
+    assert context.maximum_version is ssl.TLSVersion.TLSv1_2
+    assert "AES128-GCM-SHA256" in {
+        cipher["name"] for cipher in context.get_ciphers()
+    }

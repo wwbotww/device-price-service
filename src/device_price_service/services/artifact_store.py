@@ -25,10 +25,16 @@ class RawArtifactStore:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def save(self, *, brand_code: str, crawl_run_id: int, result: FetchResult) -> ArtifactReference:
-        segment = brand_code.lower()
+    def save(
+        self,
+        *,
+        source_code: str,
+        crawl_run_id: int,
+        result: FetchResult,
+    ) -> ArtifactReference:
+        segment = source_code.lower()
         if not self._SAFE_SEGMENT.fullmatch(segment):
-            raise ArtifactError("brand_code contains unsafe path characters")
+            raise ArtifactError("source_code contains unsafe path characters")
         day = result.fetched_at
         target_dir = (
             self.root / segment / f"{day:%Y}" / f"{day:%m}" / f"{day:%d}" / str(crawl_run_id)
@@ -74,4 +80,8 @@ class RawArtifactStore:
     def _extension(content_type: str) -> str:
         if content_type in {"application/json", "application/ld+json"}:
             return "json"
-        return "html"
+        if content_type == "application/vnd.ms-excel":
+            return "xls"
+        if content_type in {"text/html", "application/xhtml+xml"}:
+            return "html"
+        return "bin"

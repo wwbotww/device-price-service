@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page, Route, async_playwright
@@ -29,7 +29,15 @@ class BrowserFetcher:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    async def fetch(self, url: str, *, allowed_domains: list[str]) -> FetchResult:
+    async def fetch(
+        self,
+        url: str,
+        *,
+        allowed_domains: list[str],
+        tls_profile: Literal["DEFAULT", "TLS12_COMPAT"] = "DEFAULT",
+    ) -> FetchResult:
+        if tls_profile != "DEFAULT":
+            raise ValueError("browser fetcher does not support alternate TLS profiles")
         policy = UrlPolicy(allowed_domains)
         policy.validate(url)
         started = time.monotonic()

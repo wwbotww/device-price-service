@@ -1,0 +1,35 @@
+{
+  "merchant": {
+    "merchant_key": "fixture-platform-self",
+    "external_merchant_id": "fixture-self-001",
+    "name": "示例平台自营",
+    "seller_type": "PLATFORM_SELF",
+    "verification_status": "VERIFIED"
+  },
+  "listings": [
+    {
+      "listing_key": "fresh-apple-5kg:retail",
+      "url": "https://fresh.example.test/items/apple-5kg",
+      "category_code": "FRESH_APPLE",
+      "price_nature": "RETAIL_OFFER",
+      "external_product_id": "fixture-apple",
+      "external_sku_id": "fixture-apple-5kg"
+    },
+    {
+      "listing_key": "packaged-egg-30:retail",
+      "url": "https://fresh.example.test/items/egg-30",
+      "category_code": "FRESH_EGG",
+      "price_nature": "RETAIL_OFFER",
+      "external_product_id": "fixture-egg",
+      "external_sku_id": "fixture-egg-30"
+    },
+    {
+      "listing_key": "pork-belly-500g:retail",
+      "url": "https://fresh.example.test/items/pork-belly-500g",
+      "category_code": "FRESH_PORK",
+      "price_nature": "RETAIL_OFFER",
+      "external_product_id": "fixture-pork",
+      "external_sku_id": "fixture-pork-belly-500g"
+    }
+  ]
+}

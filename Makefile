@@ -1,4 +1,4 @@
-.PHONY: setup browser-install db-up db-down mysql57-up mysql57-down migrate seed test test-unit test-integration test-integration-mysql57 lint format db-check db-audit adapters crawl replay scheduler
+.PHONY: setup browser-install db-up db-down mysql57-up mysql57-down migrate seed seed-v2-fresh seed-v2-government catalog-sources catalog-smoke catalog-crawl test test-unit test-integration test-integration-mysql57 lint format db-check db-audit adapters crawl replay scheduler
 
 setup:
 	uv sync
@@ -23,6 +23,21 @@ migrate:
 
 seed:
 	uv run device-price db seed
+
+seed-v2-fresh:
+	uv run device-price db seed-v2-fresh
+
+seed-v2-government:
+	uv run device-price db seed-v2-government
+
+catalog-sources:
+	uv run device-price catalog sources
+
+catalog-smoke:
+	uv run device-price catalog smoke --channel "$(or $(CHANNEL),SH_FGW_FRESH_RETAIL)" $(if $(COMMODITY),--commodity "$(COMMODITY)",)
+
+catalog-crawl:
+	uv run device-price catalog crawl --channel "$(or $(CHANNEL),SH_FGW_FRESH_RETAIL)" $(if $(COMMODITY),--commodity "$(COMMODITY)",)
 
 db-check:
 	uv run device-price db check

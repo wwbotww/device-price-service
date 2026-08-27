@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from device_price_service.domain.crawl import (
     BrowserSnapshotPlan,
@@ -14,7 +14,13 @@ from device_price_service.domain.crawl import (
 
 
 class Fetcher(Protocol):
-    async def fetch(self, url: str, *, allowed_domains: list[str]) -> FetchResult: ...
+    async def fetch(
+        self,
+        url: str,
+        *,
+        allowed_domains: list[str],
+        tls_profile: Literal["DEFAULT", "TLS12_COMPAT"] = "DEFAULT",
+    ) -> FetchResult: ...
 
 
 class BrowserSnapshotFetcher(Fetcher, Protocol):

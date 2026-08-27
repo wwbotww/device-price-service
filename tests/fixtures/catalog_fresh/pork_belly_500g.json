@@ -1,0 +1,26 @@
+{
+  "title": "示例冷鲜带皮去骨猪五花肉 一级 500g",
+  "category_path": "食品/生鲜/肉类/猪肉",
+  "attributes": {
+    "cut": "猪五花肉",
+    "origin": "山东示例产区",
+    "grade": "一级",
+    "freshness_state": "冷鲜",
+    "packaging": "真空包装",
+    "bone_state": "去骨",
+    "skin_state": "带皮",
+    "net_content": "500g"
+  },
+  "prices": [
+    {
+      "current_price": "28.80",
+      "original_price": "35.80",
+      "original_price_type": "CROSSED_OUT",
+      "price_type": "DIRECT_UNCONDITIONAL",
+      "pricing_basis": "PACKAGE_TOTAL",
+      "availability": "ON_SALE",
+      "fee_status": "SEPARATE_FEES_EXCLUDED",
+      "displayed_price_text": "商品价 ¥28.80，不含运费"
+    }
+  ]
+}

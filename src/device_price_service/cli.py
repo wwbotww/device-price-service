@@ -12,6 +12,37 @@ from sqlalchemy import inspect, select, text
 from device_price_service.config import Settings, get_settings
 from device_price_service.crawlers.base import AdapterContext
 from device_price_service.crawlers.builtin import build_builtin_registry
+from device_price_service.crawlers.catalog_builtin import build_catalog_dataset_registry
+from device_price_service.crawlers.mofcom_fresh import (
+    MOFCOM_FRESH_CATEGORY_CODE,
+    MOFCOM_SUPPORTED_COMMODITIES,
+)
+from device_price_service.crawlers.shanghai_fresh import (
+    SHANGHAI_FRESH_CATEGORY_CODE,
+    SHANGHAI_FRESH_REGION_CODE,
+)
+from device_price_service.db.catalog_models import (
+    CatalogBrand,
+    CatalogCrawlRecord,
+    CatalogCrawlRun,
+    CatalogItem,
+    CatalogPriceCurrent,
+    CatalogPriceObservationRecord,
+    ItemVariant,
+    ListingMatch,
+    ListingRevision,
+    Merchant,
+    SourceChannel,
+    SourceListing,
+    TaxonomyCategory,
+)
+from device_price_service.db.catalog_seed import (
+    MOFCOM_FRESH_CHANNEL_CODE,
+    SHANGHAI_FRESH_CHANNEL_CODE,
+    seed_fresh_categories,
+    seed_mofcom_fresh_source,
+    seed_shanghai_fresh_source,
+)
 from device_price_service.db.models import (
     Brand,
     Category,
@@ -27,18 +58,26 @@ from device_price_service.db.models import (
 from device_price_service.db.mysql_compat import compatibility_mode, validate_mysql_version
 from device_price_service.db.seed import CHANNELS, seed_reference_data
 from device_price_service.db.session import create_database_engine, create_session_factory
+from device_price_service.domain.catalog_crawl import CatalogCollectionRequest
+from device_price_service.domain.catalog_enums import RegionScope
 from device_price_service.logging import configure_logging
-from device_price_service.runtime import ApplicationRuntime, build_runtime
+from device_price_service.runtime import (
+    ApplicationRuntime,
+    build_catalog_runtime,
+    build_runtime,
+)
 from device_price_service.scheduler import CrawlScheduler
 from device_price_service.services.database_audit import audit_database
 from device_price_service.services.replay_service import ReplayService
 from device_price_service.validation.rules import QualityValidator
 
-app = typer.Typer(help="Official device price collection service")
+app = typer.Typer(help="Auditable public price collection service")
 db_app = typer.Typer(help="Database lifecycle commands")
+catalog_app = typer.Typer(help="V2 government public-price collection commands")
 app.add_typer(db_app, name="db")
+app.add_typer(catalog_app, name="catalog")
 
-EXPECTED_TABLES = {
+V1_TABLES = {
     Brand.__tablename__,
     Category.__tablename__,
     Product.__tablename__,
@@ -50,6 +89,22 @@ EXPECTED_TABLES = {
     CrawlRun.__tablename__,
     CrawlRecord.__tablename__,
 }
+V2_TABLES = {
+    CatalogBrand.__tablename__,
+    TaxonomyCategory.__tablename__,
+    CatalogItem.__tablename__,
+    ItemVariant.__tablename__,
+    SourceChannel.__tablename__,
+    Merchant.__tablename__,
+    SourceListing.__tablename__,
+    ListingRevision.__tablename__,
+    ListingMatch.__tablename__,
+    CatalogPriceObservationRecord.__tablename__,
+    CatalogPriceCurrent.__tablename__,
+    CatalogCrawlRun.__tablename__,
+    CatalogCrawlRecord.__tablename__,
+}
+EXPECTED_TABLES = V1_TABLES | V2_TABLES
 
 
 @app.callback()
@@ -75,7 +130,7 @@ def db_check() -> None:
         typer.echo(f"missing={sorted(missing)} unexpected={sorted(unexpected)}", err=True)
         raise typer.Exit(code=1)
     typer.echo(
-        "database connection OK; all 10 application tables are present; "
+        f"database connection OK; all {len(EXPECTED_TABLES)} application tables are present; "
         f"server={raw_version}; mode={compatibility_mode(version)}; "
         f"session_time_zone={session_time_zone}"
     )
@@ -97,6 +152,44 @@ def db_seed() -> None:
     typer.echo(
         f"seed complete: {counts['brands']} brands, {counts['categories']} categories, "
         f"{counts['channels']} channels"
+    )
+
+
+@db_app.command("seed-v2-fresh")
+def db_seed_v2_fresh() -> None:
+    """Seed the implemented V2 fresh-food category tree and rule references."""
+
+    engine = create_database_engine()
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        categories = seed_fresh_categories(session)
+    typer.echo(f"V2 fresh category seed complete: {len(categories)} categories")
+
+
+@db_app.command("seed-v2-government")
+def db_seed_v2_government(
+    enable: Annotated[
+        bool,
+        typer.Option(
+            "--enable",
+            help="Explicitly enable both government sources after seeding them",
+        ),
+    ] = False,
+) -> None:
+    """Seed fresh rules and government sources, disabled by default."""
+
+    engine = create_database_engine()
+    factory = create_session_factory(engine)
+    with factory.begin() as session:
+        categories = seed_fresh_categories(session)
+        channels = (
+            seed_shanghai_fresh_source(session, enable=enable),
+            seed_mofcom_fresh_source(session, enable=enable),
+        )
+    typer.echo(
+        f"V2 government seed complete: {len(categories)} categories; "
+        f"channels={','.join(channel.code for channel in channels)}; "
+        f"enabled={all(bool(channel.enabled) for channel in channels)}"
     )
 
 
@@ -181,6 +274,58 @@ def scheduler() -> None:
     asyncio.run(_serve_scheduler(settings))
 
 
+@catalog_app.command("sources")
+def list_catalog_sources() -> None:
+    """List V2 public-data connectors without accessing a source or database."""
+
+    for connector in build_catalog_dataset_registry():
+        typer.echo(
+            f"{connector.channel_code}\t{connector.connector_code}\t{connector.version}"
+        )
+
+
+@catalog_app.command("smoke")
+def catalog_smoke(
+    channel: Annotated[
+        str,
+        typer.Option("--channel", "-c", help="Government source channel code"),
+    ] = SHANGHAI_FRESH_CHANNEL_CODE,
+    commodity: Annotated[
+        str | None,
+        typer.Option(
+            "--commodity",
+            help="MOFCOM commodity code or ALL; omit for the Shanghai dataset",
+        ),
+    ] = None,
+) -> None:
+    """Read and parse the latest public document without writing MySQL rows."""
+
+    settings = get_settings()
+    _require_live_crawl(settings.live_crawl_enabled)
+    asyncio.run(_catalog_smoke_once(settings, channel, commodity))
+
+
+@catalog_app.command("crawl")
+def catalog_crawl(
+    channel: Annotated[
+        str,
+        typer.Option("--channel", "-c", help="Enabled government source channel code"),
+    ] = SHANGHAI_FRESH_CHANNEL_CODE,
+    commodity: Annotated[
+        str | None,
+        typer.Option(
+            "--commodity",
+            help="MOFCOM commodity code or ALL; omit for the Shanghai dataset",
+        ),
+    ] = None,
+) -> None:
+    """Collect one latest government document into the V2 tables."""
+
+    settings = get_settings()
+    _require_live_crawl(settings.live_crawl_enabled)
+    asyncio.run(_catalog_crawl_once(settings, channel, commodity))
+
+
 async def _crawl_once(settings: Settings, brand: str) -> None:
     runtime = build_runtime(settings)
     try:
@@ -216,7 +361,7 @@ async def _smoke_once(settings: Settings, brand: str, max_products: int) -> None
         for item in discovered[:max_products]:
             result = await adapter.fetch_product(context, item)
             artifact = runtime.pipeline.artifact_store.save(
-                brand_code=adapter.brand_code,
+                source_code=adapter.channel_code,
                 crawl_run_id=0,
                 result=result,
             )
@@ -322,6 +467,146 @@ async def _serve_scheduler(settings: Settings) -> None:
     )
     try:
         await crawl_scheduler.serve()
+    finally:
+        await runtime.aclose()
+
+
+def _shanghai_catalog_request() -> CatalogCollectionRequest:
+    return CatalogCollectionRequest(
+        region_scope=RegionScope.CITY,
+        region_code=SHANGHAI_FRESH_REGION_CODE,
+        category_codes=(SHANGHAI_FRESH_CATEGORY_CODE,),
+    )
+
+
+def _catalog_requests(
+    channel: str,
+    commodity: str | None,
+) -> list[CatalogCollectionRequest]:
+    normalized_channel = channel.strip().upper()
+    normalized_commodity = commodity.strip().upper() if commodity else None
+    if normalized_channel == SHANGHAI_FRESH_CHANNEL_CODE:
+        if normalized_commodity is not None:
+            raise typer.BadParameter(
+                "--commodity is only supported by the MOFCOM source"
+            )
+        return [_shanghai_catalog_request()]
+    if normalized_channel == MOFCOM_FRESH_CHANNEL_CODE:
+        supported = [mapping.commodity_code for mapping in MOFCOM_SUPPORTED_COMMODITIES]
+        if normalized_commodity in {None, "ALL"}:
+            selected = supported
+        elif normalized_commodity in supported:
+            selected = [normalized_commodity]
+        else:
+            raise typer.BadParameter(
+                f"unsupported MOFCOM commodity {normalized_commodity!r}; "
+                f"choose one of {', '.join(supported)} or ALL"
+            )
+        return [
+            CatalogCollectionRequest(
+                region_scope=RegionScope.MULTI,
+                region_code="*",
+                category_codes=(MOFCOM_FRESH_CATEGORY_CODE,),
+                source_item_codes=(code,),
+            )
+            for code in selected
+        ]
+    raise typer.BadParameter(f"catalog source does not define a request scope: {channel}")
+
+
+async def _catalog_smoke_once(
+    settings: Settings,
+    channel: str,
+    commodity: str | None,
+) -> None:
+    runtime = build_catalog_runtime(settings)
+    try:
+        connector = runtime.registry.get(channel)
+        context = AdapterContext(
+            http=runtime.http_fetcher,
+            browser=runtime.browser_fetcher,
+            allowed_domains=list(connector.allowed_domains),
+        )
+        payloads: list[dict[str, object]] = []
+        for request in _catalog_requests(connector.channel_code, commodity):
+            dataset = await connector.discover_dataset(context, request)
+            result = await connector.fetch_dataset(context, dataset)
+            parsed = connector.parse_dataset(dataset, result)
+            prices = [
+                {
+                    "commodity_code": row.item.external_product_id,
+                    "merchant": row.item.merchant.name,
+                    "region_scope": candidate.region.scope.value
+                    if candidate.region is not None
+                    else None,
+                    "region_code": candidate.region.code
+                    if candidate.region is not None
+                    else None,
+                    "current_price": str(candidate.current_price)
+                    if candidate.current_price is not None
+                    else None,
+                    "original_price": str(candidate.original_price)
+                    if candidate.original_price is not None
+                    else None,
+                }
+                for row in parsed.rows
+                for candidate in row.parsed.price_candidates
+            ]
+            payloads.append(
+                {
+                    "channel": connector.channel_code,
+                    "dataset_key": dataset.dataset_key,
+                    "source_page_url": dataset.source_page_url,
+                    "source_observed_at": dataset.source_observed_at.isoformat(
+                        timespec="milliseconds"
+                    ),
+                    "status_code": result.status_code,
+                    "content_type": result.content_type,
+                    "source_hash": result.source_hash,
+                    "parsed_count": len(parsed.rows),
+                    "price_count": len(prices),
+                    "prices": prices[:10],
+                    "price_samples_truncated": len(prices) > 10,
+                }
+            )
+        payload: dict[str, object]
+        if len(payloads) == 1:
+            payload = payloads[0]
+        else:
+            payload = {
+                "channel": connector.channel_code,
+                "dataset_count": len(payloads),
+                "datasets": payloads,
+            }
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    finally:
+        await runtime.aclose()
+
+
+async def _catalog_crawl_once(
+    settings: Settings,
+    channel: str,
+    commodity: str | None,
+) -> None:
+    runtime = build_catalog_runtime(settings)
+    try:
+        connector = runtime.registry.get(channel)
+        outcomes = [
+            await runtime.pipeline.run_dataset(connector, request)
+            for request in _catalog_requests(connector.channel_code, commodity)
+        ]
+        payload: object
+        if len(outcomes) == 1:
+            payload = asdict(outcomes[0])
+        else:
+            payload = {
+                "channel": connector.channel_code,
+                "dataset_count": len(outcomes),
+                "outcomes": [asdict(outcome) for outcome in outcomes],
+            }
+        typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        if any(outcome.failed_count for outcome in outcomes):
+            raise typer.Exit(code=1)
     finally:
         await runtime.aclose()
 

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import random
+import ssl
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
 from email.utils import parsedate_to_datetime
+from typing import Literal
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -29,6 +31,9 @@ class ResponseTooLargeError(HttpFetchError):
 
 class TooManyRedirectsError(HttpFetchError):
     """Raised when a redirect chain exceeds the configured maximum."""
+
+
+TlsProfile = Literal["DEFAULT", "TLS12_COMPAT"]
 
 
 class DomainThrottle:
@@ -72,19 +77,28 @@ class HttpFetcher:
             max_delay=settings.http_max_delay_seconds,
         )
         self._owns_client = client is None
-        self.client = client or httpx.AsyncClient(
+        self.client = client or self._new_client()
+        self._tls12_compat_client: httpx.AsyncClient | None = None
+
+    def _new_client(
+        self,
+        *,
+        verify: ssl.SSLContext | bool = True,
+    ) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
             timeout=httpx.Timeout(
-                connect=settings.http_connect_timeout_seconds,
-                read=settings.http_read_timeout_seconds,
-                write=settings.http_read_timeout_seconds,
-                pool=settings.http_connect_timeout_seconds,
+                connect=self.settings.http_connect_timeout_seconds,
+                read=self.settings.http_read_timeout_seconds,
+                write=self.settings.http_read_timeout_seconds,
+                pool=self.settings.http_connect_timeout_seconds,
             ),
             headers={
-                "User-Agent": settings.crawler_user_agent,
+                "User-Agent": self.settings.crawler_user_agent,
                 "Accept-Language": "zh-CN,zh;q=0.9",
             },
             follow_redirects=False,
             trust_env=False,
+            verify=verify,
         )
 
     async def __aenter__(self) -> HttpFetcher:
@@ -96,16 +110,25 @@ class HttpFetcher:
     async def aclose(self) -> None:
         if self._owns_client:
             await self.client.aclose()
+        if self._tls12_compat_client is not None:
+            await self._tls12_compat_client.aclose()
 
-    async def fetch(self, url: str, *, allowed_domains: list[str]) -> FetchResult:
+    async def fetch(
+        self,
+        url: str,
+        *,
+        allowed_domains: list[str],
+        tls_profile: TlsProfile = "DEFAULT",
+    ) -> FetchResult:
         policy = UrlPolicy(allowed_domains)
         policy.validate(url)
         started = time.monotonic()
         last_error: httpx.RequestError | None = None
+        client = self._client_for_profile(tls_profile)
 
         for attempt in range(1, self.retry_attempts + 1):
             try:
-                result = await self._fetch_redirect_chain(url, policy)
+                result = await self._fetch_redirect_chain(url, policy, client=client)
             except httpx.RequestError as error:
                 last_error = error
                 if attempt == self.retry_attempts:
@@ -123,12 +146,18 @@ class HttpFetcher:
             f"request failed after {self.retry_attempts} attempts: {url}"
         ) from last_error
 
-    async def _fetch_redirect_chain(self, url: str, policy: UrlPolicy) -> FetchResult:
+    async def _fetch_redirect_chain(
+        self,
+        url: str,
+        policy: UrlPolicy,
+        *,
+        client: httpx.AsyncClient,
+    ) -> FetchResult:
         current_url = url
         for redirect_count in range(self.settings.http_max_redirects + 1):
             policy.validate(current_url)
             async with self.throttle.slot(current_url):
-                response = await self.client.get(current_url)
+                response = await client.get(current_url)
             body = response.content
             if len(body) > self.settings.http_max_response_bytes:
                 raise ResponseTooLargeError(
@@ -148,6 +177,17 @@ class HttpFetcher:
             return self._to_result(url, current_url, response, body)
 
         raise TooManyRedirectsError(f"too many redirects for {url}")
+
+    def _client_for_profile(self, profile: TlsProfile) -> httpx.AsyncClient:
+        if profile == "DEFAULT":
+            return self.client
+        if profile != "TLS12_COMPAT":
+            raise ValueError(f"unsupported TLS profile: {profile}")
+        if self._tls12_compat_client is None:
+            self._tls12_compat_client = self._new_client(
+                verify=_tls12_compat_context()
+            )
+        return self._tls12_compat_client
 
     @staticmethod
     def _to_result(
@@ -190,3 +230,13 @@ class HttpFetcher:
         if parsed.tzinfo is not None:
             parsed = parsed.replace(tzinfo=None)
         return (parsed - now).total_seconds()
+
+
+def _tls12_compat_context() -> ssl.SSLContext:
+    """Keep certificate verification while supporting a narrowly scoped legacy endpoint."""
+
+    context = ssl.create_default_context()
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.maximum_version = ssl.TLSVersion.TLSv1_2
+    context.set_ciphers("AES128-GCM-SHA256")
+    return context

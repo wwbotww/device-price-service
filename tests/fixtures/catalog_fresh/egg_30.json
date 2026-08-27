@@ -1,0 +1,25 @@
+{
+  "title": "示例鲜鸡蛋 A级 2盒×15枚",
+  "category_path": "食品/生鲜/蛋品",
+  "attributes": {
+    "egg_type": "鲜鸡蛋",
+    "origin": "河北示例产区",
+    "grade": "A级",
+    "freshness_state": "新鲜",
+    "packaging": "盒装",
+    "shell_color": "brown",
+    "net_content": "2盒×15枚"
+  },
+  "prices": [
+    {
+      "current_price": "32.80",
+      "original_price": "39.90",
+      "original_price_type": "CROSSED_OUT",
+      "price_type": "DIRECT_UNCONDITIONAL",
+      "pricing_basis": "PACKAGE_TOTAL",
+      "availability": "ON_SALE",
+      "fee_status": "ITEM_ONLY",
+      "displayed_price_text": "售价 ¥32.80"
+    }
+  ]
+}

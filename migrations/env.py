@@ -6,7 +6,10 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from device_price_service.config import get_settings
-from device_price_service.db import models  # noqa: F401
+from device_price_service.db import (
+    catalog_models,  # noqa: F401
+    models,  # noqa: F401
+)
 from device_price_service.db.base import Base
 
 config = context.config

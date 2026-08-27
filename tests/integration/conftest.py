@@ -4,6 +4,8 @@ import os
 from collections.abc import Iterator
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -36,3 +38,16 @@ def session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Session]]:
     factory = create_session_factory(mysql_engine)
     yield factory
     Base.metadata.drop_all(mysql_engine)
+
+
+@pytest.fixture()
+def migrated_session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Session]]:
+    """Use the actual Alembic schema, including MySQL 5.7 compatibility triggers."""
+    Base.metadata.drop_all(mysql_engine)
+    config = Config("alembic.ini")
+    config.set_main_option("sqlalchemy.url", mysql_engine.url.render_as_string(hide_password=False))
+    command.stamp(config, "base", purge=True)
+    command.upgrade(config, "head")
+    factory = create_session_factory(mysql_engine)
+    yield factory
+    command.downgrade(config, "base")

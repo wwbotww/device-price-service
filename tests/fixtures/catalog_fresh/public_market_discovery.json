@@ -1,0 +1,19 @@
+{
+  "merchant": {
+    "merchant_key": "fixture-public-market",
+    "external_merchant_id": "fixture-market-001",
+    "name": "示例公共市场数据源",
+    "seller_type": "PUBLIC_MARKET",
+    "verification_status": "VERIFIED"
+  },
+  "listings": [
+    {
+      "listing_key": "market-red-fuji-grade1:average",
+      "url": "https://market.example.test/prices/red-fuji-grade1",
+      "category_code": "FRESH_APPLE",
+      "price_nature": "MARKET_AVERAGE",
+      "external_product_id": "fixture-market-red-fuji",
+      "external_sku_id": "fixture-market-red-fuji-500g"
+    }
+  ]
+}

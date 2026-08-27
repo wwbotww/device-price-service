@@ -1,0 +1,25 @@
+{
+  "title": "示例市场红富士苹果一级平均价（每500克）",
+  "category_path": "公共价格/农产品/水果/苹果",
+  "attributes": {
+    "variety": "红富士",
+    "origin": "陕西洛川",
+    "grade": "一级",
+    "freshness_state": "新鲜",
+    "packaging": "简装",
+    "fruit_diameter_mm": "80",
+    "net_content": "500克"
+  },
+  "prices": [
+    {
+      "current_price": "6.80",
+      "original_price": null,
+      "original_price_type": "NONE",
+      "price_type": "PUBLISHED_VALUE",
+      "pricing_basis": "UNIT_QUOTED",
+      "availability": "UNKNOWN",
+      "fee_status": "NOT_APPLICABLE",
+      "displayed_price_text": "平均价 6.80元/500克"
+    }
+  ]
+}

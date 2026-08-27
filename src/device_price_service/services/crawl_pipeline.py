@@ -194,7 +194,7 @@ class CrawlPipeline:
         try:
             result = prefetched_result or await adapter.fetch_product(context, item)
             artifact = self.artifact_store.save(
-                brand_code=adapter.brand_code,
+                source_code=adapter.channel_code,
                 crawl_run_id=run_id,
                 result=result,
             )
@@ -227,7 +227,7 @@ class CrawlPipeline:
                 self._record_large_change_recheck(run_id, item, result, artifact, report)
                 confirmation = await adapter.fetch_product(context, item)
                 confirmation_artifact = self.artifact_store.save(
-                    brand_code=adapter.brand_code,
+                    source_code=adapter.channel_code,
                     crawl_run_id=run_id,
                     result=confirmation,
                 )
@@ -325,7 +325,7 @@ class CrawlPipeline:
                     prefetched_result=result,
                 )
             artifact = self.artifact_store.save(
-                brand_code=adapter.brand_code,
+                source_code=adapter.channel_code,
                 crawl_run_id=run_id,
                 result=result,
             )

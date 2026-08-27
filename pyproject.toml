@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "device-price-service"
 version = "0.1.0"
-description = "Official device price collection and MySQL persistence service"
+description = "Auditable public price collection and MySQL persistence service"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -19,6 +19,7 @@ dependencies = [
   "sqlalchemy>=2.0",
   "structlog>=24.4",
   "typer>=0.15",
+  "xlrd>=2.0.2,<3",
 ]
 
 [project.scripts]

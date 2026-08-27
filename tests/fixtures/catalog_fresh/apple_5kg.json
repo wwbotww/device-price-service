@@ -1,0 +1,35 @@
+{
+  "title": "示例陕西洛川红富士苹果 一级果 80mm 5kg箱装",
+  "category_path": "食品/生鲜/水果/苹果",
+  "attributes": {
+    "variety": "红富士苹果",
+    "origin": "陕西洛川",
+    "grade": "一级",
+    "freshness_state": "新鲜",
+    "packaging": "箱装",
+    "fruit_diameter_mm": "80",
+    "net_content": "5kg"
+  },
+  "prices": [
+    {
+      "current_price": "79.00",
+      "original_price": "99.00",
+      "original_price_type": "EXPLICIT_ORIGINAL",
+      "price_type": "DIRECT_UNCONDITIONAL",
+      "pricing_basis": "PACKAGE_TOTAL",
+      "availability": "ON_SALE",
+      "fee_status": "ITEM_ONLY",
+      "displayed_price_text": "售价 ¥79.00"
+    },
+    {
+      "current_price": "69.00",
+      "original_price": null,
+      "original_price_type": "NONE",
+      "price_type": "MEMBER",
+      "pricing_basis": "PACKAGE_TOTAL",
+      "availability": "ON_SALE",
+      "fee_status": "ITEM_ONLY",
+      "displayed_price_text": "会员价 ¥69.00"
+    }
+  ]
+}
