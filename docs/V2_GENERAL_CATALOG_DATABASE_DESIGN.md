@@ -1,8 +1,8 @@
 # V2 全品类价格采集数据库设计
 
-> 状态：通用结构已确认并部署公司库；当前数据范围为政府公开生鲜价格
+> 状态：政府生鲜结构已部署公司库；设备 I～J 已实现 Apple 原生链路，本地验证；K～M 待实施
 > 适用数据库：公司 MySQL 5.7.36，同时兼容 MySQL 8.x
-> 最后更新：2026-08-25
+> 最后更新：2026-09-11
 
 ## 1. 设计结论
 
@@ -19,9 +19,11 @@ V2 将现有“官方设备 SKU 价格库”扩展为“全品类来源商品点
 
 此外仍有 Alembic 管理的 `alembic_version`，不计入业务表数量。
 
-本文表名表示逻辑名称。由于其中 `brand`、`category`、`price_current`、`crawl_run` 和 `crawl_record` 与 V1 同名，当前实现继续使用统一的 `v2_` 物理前缀。公司库已从备份后完整重建；迁移链重新建立空的 V1 兼容表和 13 张 V2 表，旧 V1 demo 数据未迁移，政府数据只写 `v2_` 表。
+本文表名表示逻辑名称。由于其中 `brand`、`category`、`price_current`、`crawl_run` 和 `crawl_record` 与 V1 同名，当前实现继续使用统一的 `v2_` 物理前缀。公司库已从备份后完整重建；随后于 2026-09-10 单独重采了 V1 设备 demo，未迁移旧数据，V2 当前仍只承载政府价格。
 
-当前来源只接入政府官方网站公开的生鲜价格。官方商城、电商、超市和个人站仍可由通用结构表达，但不是本阶段的开发或验收范围。当前执行边界见 [V2 生鲜政府价格数据开发与实施计划](V2_GENERAL_CATALOG_DEVELOPMENT_PLAN.md)。
+下一阶段直接将五品牌官方设备采集接入现有 13 张表；电商、超市和个人站仍仅保留框架能力。执行边界见[V2 全品类实施计划](V2_GENERAL_CATALOG_DEVELOPMENT_PLAN.md)，设备细节见[原生采集改造计划](V2_DEVICE_NATIVE_COLLECTION_PLAN.md)。
+
+阶段 I 已实现产品级证据 `entity_type=PRODUCT`、可信无金额状态 `price_type=AVAILABILITY_ONLY` 及配套约束；不新增业务表。领域校验、SQLAlchemy 模型、追加式 Alembic 迁移 `b72c910e4f31`、MySQL 5.7 触发器和 MySQL 8.x CHECK 已同步并验证。阶段 J 已接通 Apple 原生产品解析、标准建档和共用事务，没有追加新迁移。公司库最近确认的 head 仍为 `96524222b3ec`，本轮未迁移公司库；其余品牌和完整运行保护尚未接通，不能宣称五品牌 V2 验收完成。
 
 V1 使用 10 张表；V2 增加到 13 张不是为了追求模型完整，而是为了解决全品类场景中新出现的三个关键边界：
 
@@ -380,6 +382,8 @@ updated_at DATETIME(3) NOT NULL
 
 标题、规格、数量和属性等身份字段不可更新；仅 `last_observed_at` 和受审计的质量复核字段可以变化。标题的标点、宣传词等非身份变化不建立新版本；净重、包装数量、等级、型号、产地、保鲜状态等可比属性变化必须建立新版本。`source_listing.current_revision_id` 只能指向 `quality_status=ACCEPTED` 的版本；待复核或拒绝版本不会使可信商品身份发生跳变。
 
+阶段 J 已将采集链的当前版本选择收敛到 Repository：新规格必须有可信观察，且本次可信时点晚于现当前规格的最新可信事实；相同时点不同规格拒绝，旧时点只留历史。`last_observed_at` 包括仅能审计的拒绝价格，不能拿它判断当前版本新旧。无价状态也是可信观察，采用同一时序规则，不借用旧金额。
+
 设计作用：解决“链接没变但商品已经换规格”的历史串货问题。旧价格继续引用旧版本，新价格引用新版本，两者不会被错误地认为是同一商品。
 
 ### 7.5 `listing_match`：来源版本与标准规格的匹配决策
@@ -431,9 +435,9 @@ updated_at DATETIME(3) NOT NULL
 | `currency` | CHAR(3) | 固定 `CNY` |
 | `original_price` | DECIMAL(18,2) | 可为空 |
 | `original_price_type` | VARCHAR(32) | `CROSSED_OUT/MSRP/EXPLICIT_ORIGINAL/NONE` |
-| `current_price` | DECIMAL(18,2) | 可为空；接受为可信价时必须大于 0 |
+| `current_price` | DECIMAL(18,2) | 可为空；可信金额必须大于 0；`AVAILABILITY_ONLY` 必须为空 |
 | `price_nature` | VARCHAR(32) | `RETAIL_OFFER/WHOLESALE_OFFER/RETAIL_AVERAGE/WHOLESALE_AVERAGE/MARKET_AVERAGE/UNKNOWN` |
-| `price_type` | VARCHAR(32) | `DIRECT_UNCONDITIONAL/PUBLISHED_VALUE/MEMBER/COUPON/SUBSIDY/STARTING/INSTALLMENT/DEPOSIT/BUNDLE/UNKNOWN` |
+| `price_type` | VARCHAR(32) | `DIRECT_UNCONDITIONAL/PUBLISHED_VALUE/AVAILABILITY_ONLY/MEMBER/COUPON/SUBSIDY/STARTING/INSTALLMENT/DEPOSIT/BUNDLE/UNKNOWN` |
 | `pricing_basis` | VARCHAR(24) | `PACKAGE_TOTAL/UNIT_QUOTED/VARIABLE_ESTIMATE/UNKNOWN` |
 | `promotion_label` | VARCHAR(128) | 秒杀、限时促销等页面说明，可为空 |
 | `availability` | VARCHAR(24) | `ON_SALE/OUT_OF_STOCK/PRE_SALE/OFF_SHELF/UNKNOWN` 等 |
@@ -483,7 +487,7 @@ source_listing_id
 
 价格、来源、地区、证据和观察时间不可修改；`REVIEW_REQUIRED` 的质量状态只有在记录复核账号和时间后才可变为 `ACCEPTED` 或 `REJECTED`。如果复核发现价格金额或语义字段本身错误，必须新增修正观察并使用 `supersedes_observation_id`，不能原地改值。
 
-只有同时满足以下条件的记录才可推进 `price_current`：
+可信金额只有同时满足以下条件才可推进 `price_current`；可信无价状态使用下文独立的严格分支，不降低金额门禁：
 
 - `quality_status=ACCEPTED`；
 - 零售或批发报价必须是 `price_type=DIRECT_UNCONDITIONAL`；政府零售/批发均价必须是可验证的 `PUBLISHED_VALUE`；
@@ -499,7 +503,18 @@ source_listing_id
 
 金额约束：所有非空金额必须大于 0；`original_price` 为空时 `original_price_type` 必须为 `NONE`，反之亦然；`unit_price` 与 `unit_price_unit` 必须同时为空或同时非空。`current_price` 表示 `pricing_basis` 声明的销售单位价格，不能把“每月”“定金”或“预计整件金额”伪装为包装总价。
 
-### 8.2 `price_current`：每个来源商品、每个地区的最新可信价格指针
+可信无价状态使用 `price_type=AVAILABILITY_ONLY`，且必须同时满足：
+
+- `quality_status=ACCEPTED`、`price_nature=RETAIL_OFFER`、地区已明确；
+- `availability` 仅允许 `OFF_SHELF/OUT_OF_STOCK/COMING_SOON`；
+- `current_price/original_price/unit_price/unit_price_unit` 均为 `NULL`，`original_price_type=NONE`；
+- `pricing_basis=UNKNOWN`、`fee_status=NOT_APPLICABLE`、`promotion_label=NULL`。
+
+此分支解决“商品明确下架或缺货但不再展示价格时，上一条在售价格仍留在当前投影”的问题；历史金额继续保留，当前投影可以指向已证实的无价状态，重新在售后再由新可信价格推进。请求失败、解析失败、发现列表缺失、`UNKNOWN` 或政府均价不能使用这个例外。确认状态所需的证据判断和缺失复核调用方在阶段 K 接入；当前已验证的是领域/数据库约束、幂等和乱序投影行为。
+
+迁移 `b72c910e4f31` 不改动既有价格字段。若已经存在 `PRODUCT` 证据或 `AVAILABILITY_ONLY` 观察，降级会在任何 DDL 前拒绝；回退应采用经批准的备份恢复方案，不删除或篡改事实以强行降级。
+
+### 8.2 `price_current`：每个来源商品、每个地区的最新可信价格/状态指针
 
 | 字段 | 类型 | 约束/说明 |
 | --- | --- | --- |
@@ -550,7 +565,7 @@ source_listing_id
 | `finished_at` | DATETIME(3) | 可为空 |
 | `discovered_count` | INT UNSIGNED | 发现来源商品数 |
 | `fetched_count` | INT UNSIGNED | 成功取得响应数 |
-| `accepted_count` | INT UNSIGNED | 可信价格数 |
+| `accepted_count` | INT UNSIGNED | 可信观察数；设备接入后包括合法无价状态候选，不等同于新增事实数 |
 | `review_count` | INT UNSIGNED | 待复核数 |
 | `rejected_count` | INT UNSIGNED | 规则拒绝数 |
 | `failed_count` | INT UNSIGNED | 抓取或解析失败数 |
@@ -569,7 +584,7 @@ source_listing_id
 | `crawl_run_id` | BIGINT UNSIGNED | FK → `crawl_run.id` |
 | `source_listing_id` | BIGINT UNSIGNED | FK → `source_listing.id`，发现阶段可为空 |
 | `replayed_from_record_id` | BIGINT UNSIGNED | 自关联 FK，可为空 |
-| `entity_type` | VARCHAR(32) | `CATEGORY/SEARCH/LISTING/SKU/OFFER/PUBLIC_PRICE` |
+| `entity_type` | VARCHAR(32) | `CATEGORY/SEARCH/PRODUCT/LISTING/SKU/OFFER/PUBLIC_PRICE` |
 | `entity_key` | VARCHAR(255) | 外部 ID 或规范 URL 指纹 |
 | `request_url` | VARCHAR(1024) | 脱敏请求 URL |
 | `final_url` | VARCHAR(1024) | 重定向后 URL |
@@ -592,6 +607,8 @@ source_listing_id
 索引：`(crawl_run_id, parse_status)`、`(source_listing_id, fetched_at)`、`(entity_type, entity_key)`、`fetched_at`、`raw_hash`。
 
 设计作用：价格记录不存完整网页，仍能通过 `crawl_record → raw_path/raw_hash → 原始证据` 重放和证明来源；一个页面产出多个 SKU 价格时，多条观察可以指向同一个采集记录。
+
+`PRODUCT` 表示产品级共享证据，`source_listing_id` 可为空，由该产品各 SKU 的价格观察关联同一个记录；不能为填充外键任意挑选其中一个 SKU。阶段 J 已持久化发现产品、请求范围、品牌/渠道及主响应证据元数据；完整重放入口仍按阶段 L 开发。
 
 `artifact_manifest` 只保存不参与业务查询的证据元数据，因此暂不单独增加 `evidence_artifact` 表。将来需要独立保留期限、逐文件权限或大量截图时，再无损拆表。
 
@@ -675,13 +692,15 @@ ORDER BY observed_at DESC
 2. 创建 `crawl_record` 并登记证据位置和哈希；
 3. 根据影响可比性的规范字段取得或新建 `listing_revision`，新建时引用首份 `crawl_record`；
 4. 对该来源商品已有的 `price_current` 投影加行锁；
-5. 观察时间更新、来源身份变化且新版本身份质量合格时，使旧版本当前投影失效，再推进 `source_listing.current_revision_id`；待复核或拒绝版本只留审计；
+5. 来源身份变化、身份质量合格且本次可信观察较当前规格的可信事实更新时，使旧版本当前投影失效并推进 `source_listing.current_revision_id`；只有拒绝价格的新规格不切换当前版本；
 6. 生成 `observation_key`，幂等插入 `price_observation`；
 7. 校验来源版本、价格质量和观察时间；
 8. 满足推进条件时更新或新建对应地区的 `price_current`；
 9. 提交事务；任何一步失败全部回滚。
 
 匹配标准商品不是价格写入的前置条件。来源价格可以先保存，后续建立 `listing_match`；这避免为了提高覆盖率而强行猜测标准商品。
+
+上述是逐行逻辑，实际事务边界为完整产品或完整政府文档：先创建一条共享证据，再逐行处理 listing/revision/价格，全部成功后提交。官方设备在同一事务中建立标准型号、规格及精确匹配，政府不强制建档。任何持久化错误回滚该产品/文档后，另记失败证据，不通过审计初始化动作更新当前商品元数据。
 
 ## 13. 数据量与归档
 
@@ -742,7 +761,7 @@ ORDER BY observed_at DESC
 4. 新政府采集链路只写 V2，不增加 V1/V2 双写；
 5. 两个来源先种子初始化，再显式启用并手工采集；
 6. 关闭来源即可停止新增数据，既有点时事实不自动删除；
-7. V1 表当前为空；不为物理删掉这些兼容表或去掉 `v2_` 前缀增加新的迁移复杂度。
+7. V1 表在 2026-08-25 重建后为空，已于 2026-09-10 单独重采恢复设备 demo；本轮保留静态数据，不为物理删表或去掉 `v2_` 前缀增加新的迁移复杂度。
 
 后续数据库结构变更仍必须通过 SQLAlchemy 模型和 Alembic 共同演进，并先在专用 MySQL 5.7/8.x 验证。公司库重建过程和恢复点见 [V2 阶段 H 公司库验收报告](V2_PHASE_H_COMPANY_ACCEPTANCE_REPORT.md)。
 
@@ -786,7 +805,7 @@ ORDER BY observed_at DESC
 2. 地区只使用全国、省、市三级明确代码，不从市场名推断更细粒度；
 3. 零售均价和批发均价分别保存、分别查询；
 4. 政府数据的 `original_price` 默认为空，前一日价格和环比不映射为原价；
-5. V1 未回填且兼容表为空，V2 已从政府来源重新采集；
+5. V1 数据不回填 V2；V1 已于 2026-09-10 重新采集设备 demo，V2 已从政府来源采集，设备 V2 将直接从官方来源重采；
 6. 第一版继续使用 13 张表，不增加地区维表、别名表、调度表或证据文件表。
 
 原始证据保留期限、大规模历史归档阈值和 V1 兼容表最终清理时间在真实运行产生容量数据后再决定，不影响当前 demo 使用。

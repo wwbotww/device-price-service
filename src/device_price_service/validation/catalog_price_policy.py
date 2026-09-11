@@ -9,6 +9,7 @@ from device_price_service.domain.catalog_crawl import (
     SourcePriceCandidate,
 )
 from device_price_service.domain.catalog_enums import (
+    Availability,
     FeeStatus,
     PriceNature,
     PriceType,
@@ -32,16 +33,21 @@ class CatalogPricePolicy:
         default_region: CatalogRegion | None,
         identity: NormalizedListingIdentity,
     ) -> EvaluatedPriceCandidate:
-        region = candidate.region or default_region or CatalogRegion(
-            scope=RegionScope.UNKNOWN,
-            code="UNKNOWN",
+        region = (
+            candidate.region
+            or default_region
+            or CatalogRegion(
+                scope=RegionScope.UNKNOWN,
+                code="UNKNOWN",
+            )
         )
         unit_price = candidate.unit_price
         unit_price_unit = candidate.unit_price_unit
         expected_unit_price: Decimal | None = None
         expected_unit: str | None = None
         if (
-            candidate.pricing_basis in {
+            candidate.pricing_basis
+            in {
                 PricingBasis.PACKAGE_TOTAL,
                 PricingBasis.UNIT_QUOTED,
             }
@@ -49,9 +55,7 @@ class CatalogPricePolicy:
             and identity.base_quantity_value is not None
             and identity.base_unit is not None
         ):
-            expected_unit_price = (
-                candidate.current_price / identity.base_quantity_value
-            ).quantize(
+            expected_unit_price = (candidate.current_price / identity.base_quantity_value).quantize(
                 self._UNIT_PRICE_SCALE,
                 rounding=ROUND_HALF_UP,
             )
@@ -105,6 +109,34 @@ class CatalogPricePolicy:
         expected_unit_price: Decimal | None,
         expected_unit: str | None,
     ) -> str | None:
+        if candidate.price_type is PriceType.AVAILABILITY_ONLY:
+            if region.scope is RegionScope.UNKNOWN:
+                return "REGION_UNKNOWN"
+            if price_nature is not PriceNature.RETAIL_OFFER:
+                return "AVAILABILITY_NATURE_UNTRUSTED"
+            if candidate.availability not in {
+                Availability.OFF_SHELF,
+                Availability.OUT_OF_STOCK,
+                Availability.COMING_SOON,
+            }:
+                return "AVAILABILITY_STATE_UNTRUSTED"
+            if any(
+                value is not None
+                for value in (
+                    candidate.current_price,
+                    candidate.original_price,
+                    unit_price,
+                    unit_price_unit,
+                )
+            ):
+                return "AVAILABILITY_AMOUNT_PRESENT"
+            if (
+                candidate.pricing_basis is not PricingBasis.UNKNOWN
+                or candidate.fee_status is not FeeStatus.NOT_APPLICABLE
+                or candidate.promotion_label is not None
+            ):
+                return "AVAILABILITY_PRICING_TERMS_PRESENT"
+            return None
         if candidate.current_price is None:
             return "CURRENT_PRICE_MISSING"
         if region.scope is RegionScope.UNKNOWN:
@@ -140,6 +172,12 @@ class CatalogPricePolicy:
                 FeeStatus.SEPARATE_FEES_EXCLUDED,
             }:
                 return "FEE_SEMANTICS_UNTRUSTED"
+            if (
+                price_nature is PriceNature.RETAIL_OFFER
+                and candidate.original_price is not None
+                and candidate.original_price < candidate.current_price
+            ):
+                return "ORIGINAL_BELOW_CURRENT"
             return None
 
         if price_nature in {

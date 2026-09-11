@@ -22,8 +22,8 @@ from device_price_service.domain.catalog_crawl import (
     DiscoveredCatalogDataset,
     DiscoveredCatalogListing,
     ParsedCatalogDataset,
-    ParsedCatalogDatasetRow,
     ParsedCatalogListing,
+    ParsedCatalogRow,
     SourceMerchant,
     SourcePriceCandidate,
 )
@@ -395,7 +395,7 @@ def _parsed_market_row(
     *,
     mapping: MofcomCommodityMapping,
     market: _MarketRows,
-) -> ParsedCatalogDatasetRow:
+) -> ParsedCatalogRow:
     item = DiscoveredCatalogListing(
         listing_key=(
             f"mofcom-bj:{mapping.commodity_id}:market:{market.market_id}:unit:kg"
@@ -460,7 +460,7 @@ def _parsed_market_row(
             )
         ],
     )
-    return ParsedCatalogDatasetRow(item=item, parsed=parsed)
+    return ParsedCatalogRow(item=item, parsed=parsed)
 
 
 def _mapping_for_dataset(dataset: DiscoveredCatalogDataset) -> MofcomCommodityMapping:

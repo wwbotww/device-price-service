@@ -11,7 +11,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from device_price_service.crawlers.base import AdapterContext
-from device_price_service.crawlers.catalog import CatalogConnector
+from device_price_service.crawlers.catalog import CatalogDatasetConnector
 from device_price_service.db.catalog_models import (
     CatalogCrawlRecord,
     CatalogCrawlRun,
@@ -24,9 +24,12 @@ from device_price_service.db.catalog_models import (
 from device_price_service.db.catalog_repositories import GeneralCatalogRepository
 from device_price_service.domain.catalog_crawl import (
     CatalogCollectionRequest,
+    DiscoveredCatalogDataset,
     DiscoveredCatalogListing,
     NormalizedListingIdentity,
+    ParsedCatalogDataset,
     ParsedCatalogListing,
+    ParsedCatalogRow,
     SourceMerchant,
     SourcePriceCandidate,
 )
@@ -85,50 +88,59 @@ class SequenceFetcher:
         )
 
 
-class FixtureConnector(CatalogConnector):
+class FixtureConnector(CatalogDatasetConnector):
     channel_code = "CATALOG_FIXTURE"
     connector_code = "fixture-catalog"
     version = "fixture-catalog-1"
     fetch_method = CollectionFetchMethod.HTTP
+    allowed_domains = ("catalog.example.test",)
+    default_category_codes = ("FRESH_FRUIT",)
 
-    async def discover(
+    async def discover_dataset(
         self,
         context: AdapterContext,
         request: CatalogCollectionRequest,
-    ) -> list[DiscoveredCatalogListing]:
-        return [
-            DiscoveredCatalogListing(
-                listing_key="product-1:sku-main:retail",
-                url=LISTING_URL,
-                category_code="FRESH_FRUIT",
-                merchant=SourceMerchant(
-                    merchant_key="platform-self",
-                    external_merchant_id="self-1",
-                    name="测试平台自营",
-                    seller_type=SellerType.PLATFORM_SELF,
-                    verification_status=VerificationStatus.VERIFIED,
-                ),
-                price_nature=PriceNature.RETAIL_OFFER,
-                external_product_id="product-1",
-                external_sku_id="sku-main",
-            )
-        ]
+    ) -> DiscoveredCatalogDataset:
+        return DiscoveredCatalogDataset(
+            dataset_key="fruit-fixture",
+            url=LISTING_URL,
+            source_page_url=LISTING_URL,
+            source_observed_at=OBSERVED_AT,
+        )
 
-    async def fetch_listing(
+    @staticmethod
+    def _listing() -> DiscoveredCatalogListing:
+        return DiscoveredCatalogListing(
+            listing_key="product-1:sku-main:retail",
+            url=LISTING_URL,
+            category_code="FRESH_FRUIT",
+            merchant=SourceMerchant(
+                merchant_key="platform-self",
+                external_merchant_id="self-1",
+                name="测试平台自营",
+                seller_type=SellerType.PLATFORM_SELF,
+                verification_status=VerificationStatus.VERIFIED,
+            ),
+            price_nature=PriceNature.RETAIL_OFFER,
+            external_product_id="product-1",
+            external_sku_id="sku-main",
+        )
+
+    async def fetch_dataset(
         self,
         context: AdapterContext,
-        item: DiscoveredCatalogListing,
+        dataset: DiscoveredCatalogDataset,
     ) -> FetchResult:
-        return await context.http.fetch(item.url, allowed_domains=context.allowed_domains)
+        return await context.http.fetch(dataset.url, allowed_domains=context.allowed_domains)
 
-    def parse_listing(
+    def parse_dataset(
         self,
-        item: DiscoveredCatalogListing,
+        dataset: DiscoveredCatalogDataset,
         result: FetchResult,
-    ) -> ParsedCatalogListing:
+    ) -> ParsedCatalogDataset:
         payload = json.loads(result.body)
         price_type = PriceType(str(payload.get("price_type", "DIRECT_UNCONDITIONAL")))
-        return ParsedCatalogListing(
+        parsed = ParsedCatalogListing(
             source_title=str(payload["title"]),
             source_category_path="食品/生鲜/水果/苹果",
             source_attributes={
@@ -149,6 +161,7 @@ class FixtureConnector(CatalogConnector):
                 )
             ],
         )
+        return ParsedCatalogDataset(rows=[ParsedCatalogRow(item=self._listing(), parsed=parsed)])
 
 
 class FruitFixtureRule(CategoryRule):
@@ -262,9 +275,9 @@ def test_general_pipeline_keeps_point_prices_and_switches_listing_revision(
     pipeline = _pipeline(mysql_engine, session_factory, fetcher, tmp_path / "raw")
     connector = FixtureConnector()
 
-    first = asyncio.run(pipeline.run(connector, _request()))
-    second = asyncio.run(pipeline.run(connector, _request()))
-    third = asyncio.run(pipeline.run(connector, _request()))
+    first = asyncio.run(pipeline.run_dataset(connector, _request()))
+    second = asyncio.run(pipeline.run_dataset(connector, _request()))
+    third = asyncio.run(pipeline.run_dataset(connector, _request()))
 
     assert first.accepted_count == second.accepted_count == third.accepted_count == 1
     assert first.failed_count == second.failed_count == third.failed_count == 0
@@ -272,9 +285,7 @@ def test_general_pipeline_keeps_point_prices_and_switches_listing_revision(
         assert session.scalar(select(func.count()).select_from(Merchant)) == 1
         assert session.scalar(select(func.count()).select_from(SourceListing)) == 1
         assert session.scalar(select(func.count()).select_from(ListingRevision)) == 2
-        assert (
-            session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 3
-        )
+        assert session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 3
         current = session.scalar(select(CatalogPriceCurrent))
         assert current is not None
         observation = session.get(CatalogPriceObservationRecord, current.price_observation_id)
@@ -304,8 +315,8 @@ def test_rejected_conditional_price_is_a_fact_but_does_not_replace_current(
     pipeline = _pipeline(mysql_engine, session_factory, fetcher, tmp_path / "raw")
     connector = FixtureConnector()
 
-    accepted = asyncio.run(pipeline.run(connector, _request()))
-    rejected = asyncio.run(pipeline.run(connector, _request()))
+    accepted = asyncio.run(pipeline.run_dataset(connector, _request()))
+    rejected = asyncio.run(pipeline.run_dataset(connector, _request()))
 
     assert accepted.accepted_count == 1
     assert rejected.rejected_count == 1
@@ -322,7 +333,7 @@ def test_rejected_conditional_price_is_a_fact_but_does_not_replace_current(
         assert current.price_observation_id == observations[0].id
         run = session.get(CatalogCrawlRun, rejected.crawl_run_id)
         assert run is not None
-        assert run.status == "SUCCEEDED"
+        assert run.status == "FAILED"
         assert run.rejected_count == 1
 
 
@@ -339,7 +350,7 @@ def test_parse_failure_keeps_evidence_and_does_not_create_price(
         tmp_path / "raw",
     )
 
-    outcome = asyncio.run(pipeline.run(FixtureConnector(), _request()))
+    outcome = asyncio.run(pipeline.run_dataset(FixtureConnector(), _request()))
 
     assert outcome.failed_count == 1
     assert outcome.accepted_count == 0
@@ -357,7 +368,7 @@ def test_parse_failure_keeps_evidence_and_does_not_create_price(
         assert record.parse_status == "FAILED"
         assert record.raw_hash is not None
         assert record.raw_path is not None
+        assert record.source_listing_id is None
+        assert session.scalar(select(func.count()).select_from(SourceListing)) == 0
         assert session.scalar(select(func.count()).select_from(CatalogPriceCurrent)) == 0
-        assert (
-            session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 0
-        )
+        assert session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 0

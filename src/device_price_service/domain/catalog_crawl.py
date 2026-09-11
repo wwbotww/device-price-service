@@ -233,8 +233,8 @@ class DiscoveredCatalogDataset(BaseModel):
         return _utc_naive_milliseconds(value)
 
 
-class ParsedCatalogDatasetRow(BaseModel):
-    """One listing-shaped row parsed from a shared public data document."""
+class ParsedCatalogRow(BaseModel):
+    """One source specification and its candidates, shared by products and datasets."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -242,12 +242,74 @@ class ParsedCatalogDatasetRow(BaseModel):
     parsed: ParsedCatalogListing
 
 
+class DiscoveredCatalogProduct(BaseModel):
+    """A product fetch unit; SKU identities are discovered inside its evidence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    external_product_id: str = Field(min_length=1, max_length=128)
+    url: str = Field(min_length=1, max_length=1024)
+    category_code: str = Field(min_length=1, max_length=64)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("category_code")
+    @classmethod
+    def normalize_category(cls, value: str) -> str:
+        return value.upper()
+
+
+class ParsedCatalogProduct(BaseModel):
+    """Product identity and SKU rows from one replayable logical fetch unit."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid", str_strip_whitespace=True)
+
+    external_product_id: str = Field(min_length=1, max_length=128)
+    category_code: str = Field(min_length=1, max_length=64)
+    brand_code: str | None = Field(default=None, min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=255)
+    series_name: str | None = Field(default=None, max_length=128)
+    model_number: str | None = Field(default=None, max_length=128)
+    base_attributes: dict[str, Any] = Field(default_factory=dict)
+    rows: list[ParsedCatalogRow] = Field(min_length=1)
+
+    @field_validator("category_code", "brand_code")
+    @classmethod
+    def normalize_code(cls, value: str | None) -> str | None:
+        return value.upper() if value else value
+
+    @model_validator(mode="after")
+    def validate_product_membership(self) -> ParsedCatalogProduct:
+        seen: set[tuple[str, str, str]] = set()
+        sku_ids: set[tuple[str, str]] = set()
+        for row in self.rows:
+            if row.item.external_product_id != self.external_product_id:
+                raise ValueError("product evidence contains a row from another product")
+            if row.item.category_code != self.category_code:
+                raise ValueError("product evidence contains a row from another category")
+            if row.item.discovery_key in seen:
+                raise ValueError("product evidence contains duplicate listing identities")
+            seen.add(row.item.discovery_key)
+            if row.item.external_sku_id is not None:
+                key = (row.item.merchant.merchant_key, row.item.external_sku_id)
+                if key in sku_ids:
+                    raise ValueError("product evidence contains duplicate official SKU identities")
+                sku_ids.add(key)
+        return self
+
+    def validate_discovery(self, discovered: DiscoveredCatalogProduct) -> None:
+        if (
+            self.external_product_id != discovered.external_product_id
+            or self.category_code != discovered.category_code
+        ):
+            raise ValueError("parsed product differs from its discovery identity")
+
+
 class ParsedCatalogDataset(BaseModel):
     """Validated non-empty result of parsing one public data document."""
 
     model_config = ConfigDict(frozen=True)
 
-    rows: list[ParsedCatalogDatasetRow] = Field(min_length=1)
+    rows: list[ParsedCatalogRow] = Field(min_length=1)
 
 
 class NormalizedListingIdentity(BaseModel):
@@ -332,9 +394,7 @@ class NormalizedListingIdentity(BaseModel):
             "normalized_attributes": self.normalized_attributes,
             "condition_code": self.condition_code.value,
             "measure_type": self.measure_type.value,
-            "quantity_value": (
-                None if has_base_quantity else _decimal_token(self.quantity_value)
-            ),
+            "quantity_value": (None if has_base_quantity else _decimal_token(self.quantity_value)),
             "quantity_min": None if has_base_quantity else _decimal_token(self.quantity_min),
             "quantity_max": None if has_base_quantity else _decimal_token(self.quantity_max),
             "quantity_unit": None if has_base_quantity else self.quantity_unit,

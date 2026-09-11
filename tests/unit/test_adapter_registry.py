@@ -2,6 +2,8 @@ import pytest
 
 from device_price_service.crawlers.base import AdapterContext, BrandAdapter
 from device_price_service.crawlers.builtin import build_builtin_registry
+from device_price_service.crawlers.catalog import CatalogConnector
+from device_price_service.crawlers.catalog_builtin import build_catalog_registry
 from device_price_service.crawlers.registry import AdapterRegistry, AdapterRegistryError
 from device_price_service.domain.crawl import (
     DiscoveredProduct,
@@ -45,12 +47,24 @@ def test_registry_reports_missing_adapter() -> None:
         AdapterRegistry().get("MISSING")
 
 
-def test_builtin_registry_contains_phase_4_brands() -> None:
+def test_legacy_builtin_registry_no_longer_contains_production_brands() -> None:
     registry = build_builtin_registry()
 
-    assert len(registry) == 5
-    assert registry.get_by_brand("apple").channel_code == "APPLE_CN_WEB"
-    assert registry.get_by_brand("huawei").channel_code == "HUAWEI_CN_WEB"
-    assert registry.get_by_brand("xiaomi").channel_code == "XIAOMI_CN_WEB"
-    assert registry.get_by_brand("oppo").channel_code == "OPPO_CN_WEB"
-    assert registry.get_by_brand("vivo").channel_code == "VIVO_CN_WEB"
+    assert len(registry) == 0
+    for brand in ("apple", "huawei", "xiaomi", "oppo", "vivo"):
+        with pytest.raises(AdapterRegistryError, match="found 0"):
+            registry.get_by_brand(brand)
+
+
+def test_unified_registry_contains_five_native_device_sources_and_two_government_sources() -> None:
+    registry = build_catalog_registry()
+
+    assert len(list(registry)) == 7
+    brands = {
+        connector.brand_code: connector.channel_code
+        for connector in registry
+        if isinstance(connector, CatalogConnector)
+    }
+    assert brands == {
+        brand: f"{brand}_CN_WEB" for brand in ("APPLE", "HUAWEI", "XIAOMI", "OPPO", "VIVO")
+    }

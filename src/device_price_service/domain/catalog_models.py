@@ -124,6 +124,34 @@ class CatalogPriceObservation(BaseModel):
         return self
 
     def _validate_current_eligibility(self) -> None:
+        if self.price_type is PriceType.AVAILABILITY_ONLY:
+            if self.price_nature is not PriceNature.RETAIL_OFFER:
+                raise ValueError("availability-only facts require RETAIL_OFFER")
+            if self.region_scope is RegionScope.UNKNOWN:
+                raise ValueError("accepted observations require a known region")
+            if self.availability not in {
+                Availability.OFF_SHELF,
+                Availability.OUT_OF_STOCK,
+                Availability.COMING_SOON,
+            }:
+                raise ValueError("availability-only facts require an explicit non-selling state")
+            if any(
+                value is not None
+                for value in (
+                    self.current_price,
+                    self.original_price,
+                    self.unit_price,
+                    self.unit_price_unit,
+                )
+            ):
+                raise ValueError("availability-only facts cannot contain amounts or unit prices")
+            if (
+                self.pricing_basis is not PricingBasis.UNKNOWN
+                or self.fee_status is not FeeStatus.NOT_APPLICABLE
+                or self.promotion_label is not None
+            ):
+                raise ValueError("availability-only facts cannot carry pricing or promotion terms")
+            return
         if self.current_price is None:
             raise ValueError("accepted observations require current_price")
         if self.region_scope is RegionScope.UNKNOWN:

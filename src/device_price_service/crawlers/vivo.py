@@ -5,22 +5,39 @@ import re
 from decimal import Decimal
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
-from device_price_service.crawlers.base import AdapterContext, BrandAdapter
+from device_price_service.crawlers.base import AdapterContext
+from device_price_service.crawlers.catalog import CatalogConnector
 from device_price_service.crawlers.html import HtmlNode, parse_html
+from device_price_service.domain.catalog_crawl import (
+    CatalogCollectionRequest,
+    DiscoveredCatalogListing,
+    DiscoveredCatalogProduct,
+    ParsedCatalogListing,
+    ParsedCatalogProduct,
+    ParsedCatalogRow,
+    SourceMerchant,
+    SourcePriceCandidate,
+)
+from device_price_service.domain.catalog_enums import (
+    Availability,
+    CollectionFetchMethod,
+    FeeStatus,
+    OriginalPriceType,
+    PriceNature,
+    PriceType,
+    PricingBasis,
+    RegionScope,
+    SellerType,
+    VerificationStatus,
+)
 from device_price_service.domain.crawl import (
     BrowserSnapshotPlan,
     BrowserVariantDimension,
-    DiscoveredProduct,
     FetchResult,
-    NormalizedOffer,
-    NormalizedProduct,
-    NormalizedSku,
-    ParsedProduct,
 )
-from device_price_service.domain.enums import Availability, OriginalPriceType
 from device_price_service.domain.price_policy import PriceCandidate, PricePolicy
+from device_price_service.normalization.devices import DeviceSpecification, device_listing_key
 from device_price_service.normalization.specs import (
-    build_spec_fingerprint,
     normalize_capacity,
     normalize_text,
 )
@@ -44,30 +61,57 @@ class VivoParseError(ValueError):
     """Raised when a vivo Shop fixture no longer exposes required fields."""
 
 
-class VivoAdapter(BrandAdapter):
+class VivoCatalogConnector(CatalogConnector):
     brand_code = "VIVO"
     channel_code = "VIVO_CN_WEB"
-    version = "vivo-cn-api-v2"
+    connector_code = "vivo-cn"
+    version = "vivo-cn-catalog-product"
+    fetch_method = CollectionFetchMethod.HTTP
+    allowed_domains = ("shop.vivo.com.cn",)
+    default_category_codes = ("PHONE", "TABLET", "WATCH")
+    product_not_found_is_definitive = True
 
     def __init__(self, *, discovery_url: str = VIVO_DISCOVERY_URL) -> None:
         self.discovery_url = discovery_url
         self.price_policy = PricePolicy()
 
-    async def discover(self, context: AdapterContext) -> list[DiscoveredProduct]:
+    async def discover_products(
+        self, context: AdapterContext, request: CatalogCollectionRequest
+    ) -> list[DiscoveredCatalogProduct]:
+        if request.region_scope is not RegionScope.NATIONAL or request.region_code != "CN":
+            raise VivoParseError("vivo official prices require NATIONAL/CN scope")
+        categories = set(request.category_codes or self.default_category_codes)
+        if request.source_item_codes or not categories.issubset(self.default_category_codes):
+            raise VivoParseError("vivo request includes unsupported selections")
+        self._require_origin(self.discovery_url)
         result = await context.http.fetch(
             self.discovery_url, allowed_domains=context.allowed_domains
         )
-        if not 200 <= result.status_code < 400:
+        self._require_same_url(self.discovery_url, result.request_url)
+        self._require_same_url(self.discovery_url, result.final_url)
+        if not 200 <= result.status_code < 300:
             raise VivoParseError(f"vivo discovery returned HTTP {result.status_code}")
-        return self.parse_discovery(result.body, result.final_url)
+        return [
+            item
+            for item in self.parse_discovery(result.body, result.final_url)
+            if item.category_code in categories
+        ]
 
-    async def fetch_product(self, context: AdapterContext, item: DiscoveredProduct) -> FetchResult:
-        self._require_product_path(item.url)
+    async def fetch_product(
+        self, context: AdapterContext, item: DiscoveredCatalogProduct
+    ) -> FetchResult:
+        self._validate_product(item)
         if urlsplit(item.url).path == VIVO_INFO_PATH:
             info_result = await context.http.fetch(
                 item.url,
                 allowed_domains=context.allowed_domains,
             )
+            self._require_same_url(item.url, info_result.request_url)
+            self._require_same_url(item.url, info_result.final_url)
+            if info_result.status_code in {404, 410}:
+                return info_result
+            if not 200 <= info_result.status_code < 300:
+                raise VivoParseError(f"vivo info returned HTTP {info_result.status_code}")
             info_payload = self._api_payload(info_result.body)
             info = info_payload.get("data")
             if not isinstance(info, dict):
@@ -75,29 +119,27 @@ class VivoAdapter(BrandAdapter):
             spec_item = info.get("specItem")
             sku_ids = self._sku_ids(spec_item)
             details: dict[str, object] = {}
+            evidence = [self._request_evidence(info_result)]
+            fetched_at, duration_ms = info_result.fetched_at, info_result.duration_ms
             for sku_id in sku_ids:
+                detail_url = self._detail_url(item.external_product_id, sku_id)
                 detail_result = await context.http.fetch(
-                    self._detail_url(item.official_product_id, sku_id),
+                    detail_url,
                     allowed_domains=context.allowed_domains,
                 )
-                if not 200 <= detail_result.status_code < 400:
+                self._require_same_url(detail_url, detail_result.request_url)
+                self._require_same_url(detail_url, detail_result.final_url)
+                if not 200 <= detail_result.status_code < 300:
                     raise VivoParseError(f"vivo detail returned HTTP {detail_result.status_code}")
                 detail_payload = self._api_payload(detail_result.body)
                 detail_data = detail_payload.get("data")
                 raw = detail_data.get(sku_id) if isinstance(detail_data, dict) else None
-                if isinstance(raw, dict):
-                    details[sku_id] = {
-                        key: raw.get(key)
-                        for key in (
-                            "skuName",
-                            "colorName",
-                            "salePrice",
-                            "marketPrice",
-                            "discountPrice",
-                            "marketable",
-                            "skuStatus",
-                        )
-                    }
+                if not isinstance(raw, dict):
+                    raise VivoParseError(f"vivo detail response omits requested SKU: {sku_id}")
+                details[sku_id] = raw
+                evidence.append(self._request_evidence(detail_result))
+                fetched_at = max(fetched_at, detail_result.fetched_at)
+                duration_ms += detail_result.duration_ms
             body = json.dumps(
                 {
                     "schema": "vivo-api-detail-batch-v2",
@@ -106,6 +148,7 @@ class VivoAdapter(BrandAdapter):
                     "downSkuIds": info.get("downSkuIds", []),
                     "zeroStoreSkuIds": info.get("zeroStoreSkuIds", []),
                     "details": details,
+                    "requests": evidence,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
@@ -120,36 +163,42 @@ class VivoAdapter(BrandAdapter):
                     "x-device-price-artifact": "vivo-api-detail-batch-v2",
                 },
                 body=body,
-                fetched_at=info_result.fetched_at,
-                duration_ms=info_result.duration_ms,
+                fetched_at=fetched_at,
+                duration_ms=duration_ms,
                 fetch_method=info_result.fetch_method,
             )
         return await context.browser.fetch_snapshots(
             item.url, allowed_domains=context.allowed_domains, plan=VIVO_SNAPSHOT_PLAN
         )
 
-    def parse_product(self, item: DiscoveredProduct, result: FetchResult) -> ParsedProduct:
-        self._require_product_path(result.final_url)
+    def parse_product(
+        self, item: DiscoveredCatalogProduct, result: FetchResult
+    ) -> ParsedCatalogProduct:
+        self._validate_product(item)
+        self._require_same_url(item.url, result.request_url)
+        self._require_same_url(item.url, result.final_url)
+        if not 200 <= result.status_code < 300:
+            raise VivoParseError(f"vivo product returned HTTP {result.status_code}")
         if urlsplit(result.final_url).path == VIVO_INFO_PATH:
             return self._parse_api_product(item, result)
         name: str | None = None
         skus: list[dict[str, object]] = []
         seen: set[str] = set()
-        for snapshot in self._snapshots(result.body):
+        for snapshot in self._snapshots(result.body, item.url):
             selections, root = self._snapshot_fields(snapshot)
             heading = root.first(lambda node: node.tag == "h1" or node.has_class("product-name"))
             current = root.first(
                 lambda node: node.has_class("current-price") or node.has_class("sale-price")
             )
-            if heading is None or current is None:
-                raise VivoParseError("vivo product snapshot lacks name or direct price")
+            if heading is None:
+                raise VivoParseError("vivo product snapshot lacks name")
             snapshot_name = normalize_text(heading.text())
             name = name or snapshot_name
             if snapshot_name != name:
                 raise VivoParseError("vivo variant snapshots contain different products")
             sku_id = self._sku_id(root)
             if sku_id in seen:
-                continue
+                raise VivoParseError(f"vivo product repeats SKU: {sku_id}")
             seen.add(sku_id)
             original = root.first(
                 lambda node: (
@@ -163,7 +212,8 @@ class VivoAdapter(BrandAdapter):
                     "sku_id": sku_id,
                     "version": self._optional_string(selections.get("version")),
                     "color": self._optional_string(selections.get("color")),
-                    "current_text": normalize_text(current.text()),
+                    "dimensions": selections,
+                    "current_text": normalize_text(current.text()) if current else None,
                     "original_text": normalize_text(original.text()) if original else None,
                     "original_label": "vivo 商城划线原价" if original else None,
                     "availability": self._availability(root.text()).value,
@@ -171,14 +221,13 @@ class VivoAdapter(BrandAdapter):
             )
         if name is None or not skus:
             raise VivoParseError("vivo snapshot evidence yielded no priced SKU")
-        return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+        return self._catalog_product(item, name, skus)
 
-    @classmethod
     def _parse_api_product(
-        cls,
-        item: DiscoveredProduct,
+        self,
+        item: DiscoveredCatalogProduct,
         result: FetchResult,
-    ) -> ParsedProduct:
+    ) -> ParsedCatalogProduct:
         try:
             envelope = json.loads(result.body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -189,107 +238,166 @@ class VivoAdapter(BrandAdapter):
         details = envelope.get("details")
         if not isinstance(product, dict) or not isinstance(details, dict):
             raise VivoParseError("vivo detail evidence schema is unsupported")
-        if normalize_text(str(product.get("id", ""))) != item.official_product_id:
+        if normalize_text(str(product.get("id", ""))) != item.external_product_id:
             raise VivoParseError("vivo detail evidence contains a different product")
         name = normalize_text(str(product.get("spuName", "")))
         if not name:
             raise VivoParseError("vivo detail evidence lacks a product name")
-        specs = cls._sku_specs(envelope.get("specItem"))
-        down = {normalize_text(str(value)) for value in envelope.get("downSkuIds", [])}
-        zero = {normalize_text(str(value)) for value in envelope.get("zeroStoreSkuIds", [])}
+        specs = self._sku_specs(envelope.get("specItem"))
+        if set(details) != set(specs):
+            raise VivoParseError("vivo detail evidence does not cover the advertised SKU map")
+        down = self._status_sku_ids(envelope.get("downSkuIds", []))
+        zero = self._status_sku_ids(envelope.get("zeroStoreSkuIds", []))
         skus: list[dict[str, object]] = []
         for sku_id, raw in details.items():
-            if not isinstance(raw, dict) or raw.get("salePrice") is None:
-                continue
+            if not isinstance(raw, dict):
+                raise VivoParseError("vivo detail evidence has an invalid SKU entry")
             normalized_sku_id = normalize_text(str(sku_id))
             attributes = specs.get(normalized_sku_id, {})
             version = next(
                 (value for key, value in attributes.items() if key in {"版本", "规格", "容量"}),
                 None,
             )
-            color = attributes.get("颜色") or cls._optional_string(raw.get("colorName"))
+            color = attributes.get("颜色") or self._optional_string(raw.get("colorName"))
             skus.append(
                 {
                     "sku_id": normalized_sku_id,
                     "version": version,
                     "color": color,
-                    "current_text": str(raw["salePrice"]),
-                    "original_text": cls._optional_string(raw.get("marketPrice")),
+                    "dimensions": attributes,
+                    "current_text": (
+                        str(raw["salePrice"]) if raw.get("salePrice") is not None else None
+                    ),
+                    "original_text": self._optional_string(raw.get("marketPrice")),
                     "original_label": "vivo 商城划线原价",
-                    "availability": cls._api_availability(
+                    "availability": self._api_availability(
                         normalized_sku_id,
                         raw,
                         down,
                         zero,
                     ).value,
-                    "source_url": cls._detail_url(
-                        item.official_product_id,
+                    "source_url": self._detail_url(
+                        item.external_product_id,
                         normalized_sku_id,
                     ),
                 }
             )
         if not skus:
             raise VivoParseError("vivo detail evidence yielded no directly priced SKU")
-        return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+        return self._catalog_product(item, name, skus)
 
-    def normalize(self, item: DiscoveredProduct, parsed: ParsedProduct) -> NormalizedProduct:
-        name = normalize_text(str(parsed.payload["name"]))
-        category = item.category_code or self._category_for_name(name) or ""
-        if self._category_for_name(name) != category:
+    def _catalog_product(
+        self, item: DiscoveredCatalogProduct, name: str, skus: list[dict[str, object]]
+    ) -> ParsedCatalogProduct:
+        if self._category_for_name(name) != item.category_code:
             raise VivoParseError("vivo product is outside the approved brand or categories")
-        raw_skus = parsed.payload.get("skus")
-        if not isinstance(raw_skus, list):
-            raise VivoParseError("vivo parsed SKU payload is invalid")
-        skus: list[NormalizedSku] = []
-        for raw in raw_skus:
-            if not isinstance(raw, dict):
-                raise VivoParseError("vivo parsed SKU entry is invalid")
-            version = self._optional_string(raw.get("version"))
-            color = self._optional_string(raw.get("color"))
-            memory, capacity = self._memory_capacity(version)
-            original_price, original_type, current_price = self._resolve_price(raw)
-            attributes = {
-                "version": version,
-                "color": color,
-                "memory": memory,
-                "capacity": capacity,
-            }
-            sku_id = normalize_text(str(raw["sku_id"]))
-            skus.append(
-                NormalizedSku(
-                    official_sku_id=sku_id,
-                    name=" ".join(part for part in (name, version, color) if part),
-                    color=color,
-                    capacity=capacity,
-                    memory=memory,
-                    attributes=attributes,
-                    spec_fingerprint=build_spec_fingerprint(attributes),
-                    offers=[
-                        NormalizedOffer(
-                            official_offer_id=sku_id,
-                            source_url=self._optional_string(raw.get("source_url"))
-                            or parsed.source_url,
-                            original_price=original_price,
-                            original_price_type=original_type,
-                            current_price=current_price,
-                            availability=Availability(str(raw["availability"])),
-                        )
-                    ],
-                )
-            )
-        return NormalizedProduct(
+        return ParsedCatalogProduct(
             brand_code=self.brand_code,
-            channel_code=self.channel_code,
-            category_code=category,
-            official_product_id=item.official_product_id,
+            category_code=item.category_code,
+            external_product_id=item.external_product_id,
             name=name,
             series_name=name,
-            official_url=parsed.source_url,
-            skus=skus,
+            rows=[self._catalog_row(item, name, raw) for raw in skus],
+        )
+
+    def _catalog_row(
+        self, item: DiscoveredCatalogProduct, name: str, raw: dict[str, object]
+    ) -> ParsedCatalogRow:
+        version = self._optional_string(raw.get("version"))
+        color = self._optional_string(raw.get("color"))
+        memory, capacity = self._memory_capacity(version)
+        dimensions = raw.get("dimensions")
+        dimensions = dimensions if isinstance(dimensions, dict) else {}
+        attributes = {
+            str(key): normalize_text(str(value))
+            for key, value in dimensions.items()
+            if value is not None and str(value).strip()
+        }
+        specification = DeviceSpecification(
+            color=color,
+            memory=memory or attributes.get("内存"),
+            capacity=capacity or attributes.get("容量"),
+            edition=version,
+            connectivity=attributes.get("网络") or attributes.get("connectivity"),
+            size=attributes.get("尺寸") or attributes.get("size"),
+            attributes={
+                key: value
+                for key, value in attributes.items()
+                if key
+                not in {
+                    "color",
+                    "颜色",
+                    "version",
+                    "版本",
+                    "网络",
+                    "connectivity",
+                    "尺寸",
+                    "size",
+                }
+            },
+        )
+        sku_id = normalize_text(str(raw["sku_id"]))
+        source_url = self._optional_string(raw.get("source_url")) or item.url
+        self._require_same_url(
+            self._detail_url(item.external_product_id, sku_id)
+            if urlsplit(source_url).path == VIVO_DETAIL_PATH
+            else item.url,
+            source_url,
+        )
+        availability = Availability(str(raw["availability"]))
+        if raw.get("current_text") is None:
+            if availability not in {
+                Availability.OFF_SHELF,
+                Availability.OUT_OF_STOCK,
+                Availability.COMING_SOON,
+            }:
+                raise VivoParseError("vivo SKU lacks direct price or explicit unavailable state")
+            candidate = SourcePriceCandidate(
+                price_type=PriceType.AVAILABILITY_ONLY,
+                pricing_basis=PricingBasis.UNKNOWN,
+                availability=availability,
+                fee_status=FeeStatus.NOT_APPLICABLE,
+            )
+        else:
+            original, original_type, current = self._resolve_price(raw)
+            candidate = SourcePriceCandidate(
+                current_price=current,
+                original_price=original,
+                original_price_type=original_type,
+                price_type=PriceType.DIRECT_UNCONDITIONAL,
+                pricing_basis=PricingBasis.PACKAGE_TOTAL,
+                availability=availability,
+                fee_status=FeeStatus.ITEM_ONLY,
+                displayed_price_text=str(raw["current_text"]),
+            )
+        return ParsedCatalogRow(
+            item=DiscoveredCatalogListing(
+                listing_key=device_listing_key(
+                    product_id=item.external_product_id, sku_id=sku_id, specification=specification
+                ),
+                url=source_url,
+                category_code=item.category_code,
+                merchant=SourceMerchant(
+                    merchant_key=self.channel_code,
+                    name="vivo 中国大陆官方商城",
+                    seller_type=SellerType.BRAND_OFFICIAL,
+                    verification_status=VerificationStatus.VERIFIED,
+                ),
+                price_nature=PriceNature.RETAIL_OFFER,
+                external_product_id=item.external_product_id,
+                external_sku_id=sku_id,
+            ),
+            parsed=ParsedCatalogListing(
+                source_title=" ".join(part for part in (name, version, color) if part),
+                source_category_path=item.category_code,
+                source_attributes={"device_specification": specification.identity_attributes()},
+                price_candidates=[candidate],
+            ),
         )
 
     @classmethod
-    def parse_discovery(cls, body: bytes, page_url: str) -> list[DiscoveredProduct]:
+    def parse_discovery(cls, body: bytes, page_url: str) -> list[DiscoveredCatalogProduct]:
+        cls._require_origin(page_url)
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -298,7 +406,7 @@ class VivoAdapter(BrandAdapter):
             return cls._parse_json_discovery(payload)
 
         root = parse_html(body)
-        items: dict[str, DiscoveredProduct] = {}
+        items: dict[str, DiscoveredCatalogProduct] = {}
         for anchor in root.find_all(lambda node: node.tag == "a" and bool(node.attrs.get("href"))):
             href = urljoin(page_url, anchor.attrs["href"])
             parsed = urlsplit(href)
@@ -312,8 +420,8 @@ class VivoAdapter(BrandAdapter):
             product_id = match.group(1)
             items.setdefault(
                 product_id,
-                DiscoveredProduct(
-                    official_product_id=product_id,
+                DiscoveredCatalogProduct(
+                    external_product_id=product_id,
                     url=f"https://shop.vivo.com.cn/product/{product_id}",
                     category_code=category,
                     metadata={"discovered_name": name},
@@ -322,8 +430,10 @@ class VivoAdapter(BrandAdapter):
         return list(items.values())
 
     @classmethod
-    def _parse_json_discovery(cls, payload: object) -> list[DiscoveredProduct]:
-        items: dict[str, DiscoveredProduct] = {}
+    def _parse_json_discovery(cls, payload: object) -> list[DiscoveredCatalogProduct]:
+        if isinstance(payload, dict) and "code" in payload and payload["code"] != 0:
+            raise VivoParseError("vivo discovery API response is unsuccessful")
+        items: dict[str, DiscoveredCatalogProduct] = {}
 
         def visit(value: object) -> None:
             if isinstance(value, list):
@@ -339,8 +449,8 @@ class VivoAdapter(BrandAdapter):
             if product_id.isdigit() and sku_id.isdigit() and category is not None:
                 items.setdefault(
                     product_id,
-                    DiscoveredProduct(
-                        official_product_id=product_id,
+                    DiscoveredCatalogProduct(
+                        external_product_id=product_id,
                         url=cls._info_url(product_id),
                         category_code=category,
                         metadata={"discovered_name": name, "seed_sku_id": sku_id},
@@ -351,6 +461,59 @@ class VivoAdapter(BrandAdapter):
 
         visit(payload)
         return list(items.values())
+
+    @classmethod
+    def _validate_product(cls, item: DiscoveredCatalogProduct) -> None:
+        cls._require_product_path(item.url)
+        if (
+            not item.external_product_id.isdigit()
+            or item.category_code not in cls.default_category_codes
+        ):
+            raise VivoParseError("vivo product identity or category is invalid")
+        parsed = urlsplit(item.url)
+        product_id = (
+            parse_qs(parsed.query)["spuId"][0]
+            if parsed.path == VIVO_INFO_PATH
+            else parsed.path.rstrip("/").rsplit("/", 1)[-1]
+        )
+        if product_id != item.external_product_id:
+            raise VivoParseError("vivo product URL disagrees with product identity")
+
+    @staticmethod
+    def _require_origin(url: str) -> None:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "shop.vivo.com.cn"
+            or parsed.username
+            or parsed.password
+            or parsed.port not in {None, 443}
+        ):
+            raise VivoParseError("vivo URL is outside the official origin")
+
+    @classmethod
+    def _require_same_url(cls, expected: str, actual: str) -> None:
+        cls._require_origin(actual)
+        first, second = urlsplit(expected), urlsplit(actual)
+        if first.path != second.path or parse_qs(first.query) != parse_qs(second.query):
+            raise VivoParseError("vivo response URL differs from its request")
+
+    @staticmethod
+    def _request_evidence(result: FetchResult) -> dict[str, object]:
+        return {
+            "request_url": result.request_url,
+            "final_url": result.final_url,
+            "status_code": result.status_code,
+            "fetched_at": result.fetched_at.isoformat(),
+            "source_hash": result.source_hash,
+            "body": result.body.decode("utf-8"),
+        }
+
+    @staticmethod
+    def _status_sku_ids(value: object) -> set[str]:
+        if not isinstance(value, list):
+            raise VivoParseError("vivo unavailable SKU list is invalid")
+        return {normalize_text(str(sku)) for sku in value}
 
     @staticmethod
     def _api_payload(body: bytes) -> dict[str, object]:
@@ -369,20 +532,21 @@ class VivoAdapter(BrandAdapter):
         values = spec_item.get("skuSpecList")
         if not isinstance(values, list):
             raise VivoParseError("vivo product has no SKU specification map")
-        result = [
-            normalize_text(str(entry.get("skuId", "")))
-            for entry in values
-            if isinstance(entry, dict)
-        ]
-        result = list(dict.fromkeys(value for value in result if value.isdigit()))
+        result: list[str] = []
+        for entry in values:
+            sku_id = normalize_text(str(entry.get("skuId", ""))) if isinstance(entry, dict) else ""
+            if not sku_id.isdigit() or sku_id in result:
+                raise VivoParseError("vivo SKU map contains invalid or duplicate identities")
+            result.append(sku_id)
         if not result or len(result) > 128:
             raise VivoParseError("vivo SKU count is empty or exceeds the safety limit")
         return result
 
-    @staticmethod
-    def _sku_specs(spec_item: object) -> dict[str, dict[str, str]]:
+    @classmethod
+    def _sku_specs(cls, spec_item: object) -> dict[str, dict[str, str]]:
+        cls._sku_ids(spec_item)
         if not isinstance(spec_item, dict):
-            return {}
+            raise VivoParseError("vivo product has no specification map")
         labels = spec_item.get("specMainSeq")
         values = spec_item.get("specItemSeq")
         entries = spec_item.get("skuSpecList")
@@ -391,26 +555,30 @@ class VivoAdapter(BrandAdapter):
             or not isinstance(values, dict)
             or not isinstance(entries, list)
         ):
-            return {}
+            raise VivoParseError("vivo specification dimensions are incomplete")
         result: dict[str, dict[str, str]] = {}
         for entry in entries:
             sequences = entry.get("sequences") if isinstance(entry, dict) else None
             sku_id = normalize_text(str(entry.get("skuId", ""))) if isinstance(entry, dict) else ""
-            if not sku_id or not isinstance(sequences, dict):
-                continue
+            if not sku_id or not isinstance(sequences, dict) or set(sequences) != set(labels):
+                raise VivoParseError("vivo SKU omits required specification dimensions")
             attributes: dict[str, str] = {}
             for dimension, sequence in sequences.items():
                 label = normalize_text(str(labels.get(dimension, "")))
                 options = values.get(dimension)
                 try:
-                    option = options[int(str(sequence)) - 1] if isinstance(options, list) else None
+                    index = int(str(sequence)) - 1
+                    option = options[index] if isinstance(options, list) and index >= 0 else None
                 except (ValueError, IndexError):
                     option = None
                 name = (
                     normalize_text(str(option.get("name", ""))) if isinstance(option, dict) else ""
                 )
-                if label and name:
-                    attributes[label] = name
+                if not label or not name or label in attributes:
+                    raise VivoParseError("vivo SKU has unresolved specification dimensions")
+                attributes[label] = name
+            if not attributes:
+                raise VivoParseError("vivo SKU has no proven specifications")
             result[sku_id] = attributes
         return result
 
@@ -421,13 +589,13 @@ class VivoAdapter(BrandAdapter):
         down: set[str],
         zero: set[str],
     ) -> Availability:
-        if sku_id in down or raw.get("marketable") != 1:
+        if sku_id in down or raw.get("marketable") == 0:
             return Availability.OFF_SHELF
         status = raw.get("skuStatus")
         has_store = status.get("hasStore") if isinstance(status, dict) else None
         if sku_id in zero or has_store == 0:
             return Availability.OUT_OF_STOCK
-        if has_store == 1:
+        if has_store == 1 and raw.get("marketable") == 1:
             return Availability.ON_SALE
         return Availability.UNKNOWN
 
@@ -479,8 +647,8 @@ class VivoAdapter(BrandAdapter):
             return "PHONE"
         return None
 
-    @staticmethod
-    def _snapshots(body: bytes) -> list[object]:
+    @classmethod
+    def _snapshots(cls, body: bytes, source_url: str) -> list[object]:
         try:
             envelope = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -493,6 +661,7 @@ class VivoAdapter(BrandAdapter):
             or not snapshots
         ):
             raise VivoParseError("vivo snapshot evidence schema is unsupported")
+        cls._require_same_url(source_url, str(envelope.get("source_url", "")))
         return snapshots
 
     @staticmethod
@@ -556,8 +725,9 @@ class VivoAdapter(BrandAdapter):
             return Availability.ON_SALE
         return Availability.UNKNOWN
 
-    @staticmethod
-    def _require_product_path(url: str) -> None:
+    @classmethod
+    def _require_product_path(cls, url: str) -> None:
+        cls._require_origin(url)
         parsed = urlsplit(url)
         legacy = re.fullmatch(r"/(?:wap/)?product/\d+", parsed.path.rstrip("/")) is not None
         query = parse_qs(parsed.query)

@@ -5,22 +5,39 @@ import re
 from decimal import Decimal
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
-from device_price_service.crawlers.base import AdapterContext, BrandAdapter
+from device_price_service.crawlers.base import AdapterContext
+from device_price_service.crawlers.catalog import CatalogConnector
 from device_price_service.crawlers.html import HtmlNode, parse_html
+from device_price_service.domain.catalog_crawl import (
+    CatalogCollectionRequest,
+    DiscoveredCatalogListing,
+    DiscoveredCatalogProduct,
+    ParsedCatalogListing,
+    ParsedCatalogProduct,
+    ParsedCatalogRow,
+    SourceMerchant,
+    SourcePriceCandidate,
+)
+from device_price_service.domain.catalog_enums import (
+    Availability,
+    CollectionFetchMethod,
+    FeeStatus,
+    OriginalPriceType,
+    PriceNature,
+    PriceType,
+    PricingBasis,
+    RegionScope,
+    SellerType,
+    VerificationStatus,
+)
 from device_price_service.domain.crawl import (
     BrowserSnapshotPlan,
     BrowserVariantDimension,
-    DiscoveredProduct,
     FetchResult,
-    NormalizedOffer,
-    NormalizedProduct,
-    NormalizedSku,
-    ParsedProduct,
 )
-from device_price_service.domain.enums import Availability, OriginalPriceType
 from device_price_service.domain.price_policy import PriceCandidate, PricePolicy
+from device_price_service.normalization.devices import DeviceSpecification, device_listing_key
 from device_price_service.normalization.specs import (
-    build_spec_fingerprint,
     normalize_capacity,
     normalize_text,
 )
@@ -43,47 +60,90 @@ class OppoParseError(ValueError):
     """Raised when an OPPO Shop fixture no longer exposes required fields."""
 
 
-class OppoAdapter(BrandAdapter):
+class OppoCatalogConnector(CatalogConnector):
     brand_code = "OPPO"
     channel_code = "OPPO_CN_WEB"
-    version = "oppo-cn-oapi-v2"
+    connector_code = "oppo-cn"
+    version = "oppo-cn-catalog-product"
+    fetch_method = CollectionFetchMethod.HTTP
+    allowed_domains = ("www.opposhop.cn",)
+    default_category_codes = ("PHONE", "TABLET", "WATCH")
 
     def __init__(self, *, discovery_url: str = OPPO_DISCOVERY_URL) -> None:
         self.discovery_url = discovery_url
         self.price_policy = PricePolicy()
 
-    async def discover(self, context: AdapterContext) -> list[DiscoveredProduct]:
+    async def discover_products(
+        self, context: AdapterContext, request: CatalogCollectionRequest
+    ) -> list[DiscoveredCatalogProduct]:
+        if request.region_scope is not RegionScope.NATIONAL or request.region_code != "CN":
+            raise OppoParseError("OPPO official prices require NATIONAL/CN scope")
+        categories = set(request.category_codes or self.default_category_codes)
+        if request.source_item_codes or not categories.issubset(self.default_category_codes):
+            raise OppoParseError("OPPO request includes unsupported selections")
+        self._require_origin(self.discovery_url)
         result = await context.http.fetch(
             self.discovery_url, allowed_domains=context.allowed_domains
         )
-        if not 200 <= result.status_code < 400:
+        self._require_same_url(self.discovery_url, result.request_url)
+        self._require_same_url(self.discovery_url, result.final_url)
+        if not 200 <= result.status_code < 300:
             raise OppoParseError(f"OPPO discovery returned HTTP {result.status_code}")
-        return self.parse_discovery(result.body, result.final_url)
+        return [
+            item
+            for item in self.parse_discovery(result.body, result.final_url)
+            if item.category_code in categories
+        ]
 
-    async def fetch_product(self, context: AdapterContext, item: DiscoveredProduct) -> FetchResult:
-        self._require_product_path(item.url)
+    async def fetch_product(
+        self, context: AdapterContext, item: DiscoveredCatalogProduct
+    ) -> FetchResult:
+        self._validate_product(item)
         if urlsplit(item.url).path == OPPO_DETAIL_PATH:
             first = await context.http.fetch(
                 item.url,
                 allowed_domains=context.allowed_domains,
             )
+            self._require_same_url(item.url, first.request_url)
+            self._require_same_url(item.url, first.final_url)
+            if first.status_code in {404, 410}:
+                return first
+            if not 200 <= first.status_code < 300:
+                raise OppoParseError(f"OPPO detail returned HTTP {first.status_code}")
             first_payload = self._response_payload(first.body)
             first_data = self._current_data(first_payload)
             sku_ids = self._variant_sku_ids(first_data)
             responses = [first_data]
+            evidence = [self._request_evidence(first)]
+            fetched_at, duration_ms = first.fetched_at, first.duration_ms
             selected_sku = normalize_text(str(first_data.get("skuId", "")))
+            if selected_sku != parse_qs(urlsplit(item.url).query)["skuId"][0]:
+                raise OppoParseError("OPPO detail response does not match requested SKU")
             for sku_id in sku_ids:
                 if sku_id == selected_sku:
                     continue
+                detail_url = self._detail_url(sku_id)
                 result = await context.http.fetch(
-                    self._detail_url(sku_id),
+                    detail_url,
                     allowed_domains=context.allowed_domains,
                 )
-                if not 200 <= result.status_code < 400:
+                self._require_same_url(detail_url, result.request_url)
+                self._require_same_url(detail_url, result.final_url)
+                if not 200 <= result.status_code < 300:
                     raise OppoParseError(f"OPPO detail returned HTTP {result.status_code}")
-                responses.append(self._current_data(self._response_payload(result.body)))
+                current = self._current_data(self._response_payload(result.body))
+                if normalize_text(str(current.get("skuId", ""))) != sku_id:
+                    raise OppoParseError("OPPO detail response does not match requested SKU")
+                responses.append(current)
+                evidence.append(self._request_evidence(result))
+                fetched_at = max(fetched_at, result.fetched_at)
+                duration_ms += result.duration_ms
             body = json.dumps(
-                {"schema": "oppo-oapi-detail-batch-v2", "responses": responses},
+                {
+                    "schema": "oppo-oapi-detail-batch-v2",
+                    "responses": responses,
+                    "requests": evidence,
+                },
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -97,36 +157,42 @@ class OppoAdapter(BrandAdapter):
                     "x-device-price-artifact": "oppo-oapi-detail-batch-v2",
                 },
                 body=body,
-                fetched_at=first.fetched_at,
-                duration_ms=first.duration_ms,
+                fetched_at=fetched_at,
+                duration_ms=duration_ms,
                 fetch_method=first.fetch_method,
             )
         return await context.browser.fetch_snapshots(
             item.url, allowed_domains=context.allowed_domains, plan=OPPO_SNAPSHOT_PLAN
         )
 
-    def parse_product(self, item: DiscoveredProduct, result: FetchResult) -> ParsedProduct:
-        self._require_product_path(result.final_url)
+    def parse_product(
+        self, item: DiscoveredCatalogProduct, result: FetchResult
+    ) -> ParsedCatalogProduct:
+        self._validate_product(item)
+        self._require_same_url(item.url, result.request_url)
+        self._require_same_url(item.url, result.final_url)
+        if not 200 <= result.status_code < 300:
+            raise OppoParseError(f"OPPO product returned HTTP {result.status_code}")
         if urlsplit(result.final_url).path == OPPO_DETAIL_PATH:
             return self._parse_oapi_product(item, result)
         name: str | None = None
         skus: list[dict[str, object]] = []
         seen: set[str] = set()
-        for snapshot in self._snapshots(result.body):
+        for snapshot in self._snapshots(result.body, item.url):
             selections, root = self._snapshot_fields(snapshot)
             heading = root.first(lambda node: node.tag == "h1" or node.has_class("product-name"))
             current = root.first(
                 lambda node: node.has_class("current-price") or node.has_class("sale-price")
             )
-            if heading is None or current is None:
-                raise OppoParseError("OPPO product snapshot lacks name or direct price")
+            if heading is None:
+                raise OppoParseError("OPPO product snapshot lacks name")
             snapshot_name = normalize_text(heading.text())
             name = name or snapshot_name
             if snapshot_name != name:
                 raise OppoParseError("OPPO variant snapshots contain different products")
             sku_id = self._sku_id(root)
             if sku_id in seen:
-                continue
+                raise OppoParseError(f"OPPO product repeats SKU: {sku_id}")
             seen.add(sku_id)
             original = root.first(
                 lambda node: (
@@ -140,7 +206,8 @@ class OppoAdapter(BrandAdapter):
                     "sku_id": sku_id,
                     "version": self._optional_string(selections.get("version")),
                     "color": self._optional_string(selections.get("color")),
-                    "current_text": normalize_text(current.text()),
+                    "dimensions": selections,
+                    "current_text": normalize_text(current.text()) if current else None,
                     "original_text": normalize_text(original.text()) if original else None,
                     "original_label": "OPPO 商城划线原价" if original else None,
                     "availability": self._availability(root.text()).value,
@@ -148,14 +215,13 @@ class OppoAdapter(BrandAdapter):
             )
         if name is None or not skus:
             raise OppoParseError("OPPO snapshot evidence yielded no priced SKU")
-        return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+        return self._catalog_product(item, name, skus)
 
-    @classmethod
     def _parse_oapi_product(
-        cls,
-        item: DiscoveredProduct,
+        self,
+        item: DiscoveredCatalogProduct,
         result: FetchResult,
-    ) -> ParsedProduct:
+    ) -> ParsedCatalogProduct:
         try:
             envelope = json.loads(result.body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -177,98 +243,143 @@ class OppoAdapter(BrandAdapter):
             if not isinstance(raw, dict):
                 raise OppoParseError("OPPO detail evidence entry is invalid")
             spu_id = normalize_text(str(raw.get("spuId", "")))
-            if spu_id != item.official_product_id:
+            if spu_id != item.external_product_id:
                 raise OppoParseError("OPPO detail evidence contains a different product")
             product_name = normalize_text(str(raw.get("seoTitle") or raw.get("product_name") or ""))
             name = name or product_name
-            if not product_name:
-                raise OppoParseError("OPPO detail evidence contains an empty product name")
+            if not product_name or self._category_for_name(product_name) != item.category_code:
+                raise OppoParseError("OPPO detail evidence has an unapproved brand or category")
             sku_id = normalize_text(str(raw.get("skuId", "")))
             current_price = raw.get("price")
-            if not sku_id or current_price is None or sku_id in seen:
-                continue
+            if not sku_id.isdigit() or sku_id in seen:
+                raise OppoParseError("OPPO detail contains an invalid or duplicate SKU")
             seen.add(sku_id)
-            attributes = raw.get("skuAttributes")
-            attributes = attributes if isinstance(attributes, dict) else {}
-            color = cls._optional_string(raw.get("color") or attributes.get("key1"))
-            version = cls._optional_string(raw.get("config") or attributes.get("key2"))
-            original = cls._optional_string(raw.get("original_price"))
+            dimensions = self._selected_dimensions(raw)
+            color = self._optional_string(raw.get("color") or dimensions.get("颜色"))
+            version = self._optional_string(raw.get("config") or dimensions.get("版本"))
+            original = self._optional_string(raw.get("original_price"))
             skus.append(
                 {
                     "sku_id": sku_id,
                     "version": version,
                     "color": color,
-                    "current_text": str(current_price),
+                    "dimensions": dimensions,
+                    "current_text": str(current_price) if current_price is not None else None,
                     "original_text": original,
                     "original_label": "OPPO 商城划线原价" if original else None,
-                    "availability": cls._availability(
+                    "availability": self._availability(
                         f"{raw.get('bty_type', '')} {raw.get('product_status', '')}"
                     ).value,
-                    "source_url": cls._detail_url(sku_id),
+                    "source_url": self._detail_url(sku_id),
                 }
             )
         if name is None or not skus:
             raise OppoParseError("OPPO detail evidence yielded no directly priced SKU")
-        return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+        expected = {sku_id for response in responses for sku_id in self._variant_sku_ids(response)}
+        if not expected.issubset(seen):
+            raise OppoParseError("OPPO detail evidence omits advertised SKUs")
+        return self._catalog_product(item, name, skus)
 
-    def normalize(self, item: DiscoveredProduct, parsed: ParsedProduct) -> NormalizedProduct:
-        name = normalize_text(str(parsed.payload["name"]))
-        category = item.category_code or self._category_for_name(name) or ""
-        if self._category_for_name(name) != category:
+    def _catalog_product(
+        self, item: DiscoveredCatalogProduct, name: str, skus: list[dict[str, object]]
+    ) -> ParsedCatalogProduct:
+        if self._category_for_name(name) != item.category_code:
             raise OppoParseError("OPPO product is outside the approved brand or categories")
-        raw_skus = parsed.payload.get("skus")
-        if not isinstance(raw_skus, list):
-            raise OppoParseError("OPPO parsed SKU payload is invalid")
-        skus: list[NormalizedSku] = []
-        for raw in raw_skus:
-            if not isinstance(raw, dict):
-                raise OppoParseError("OPPO parsed SKU entry is invalid")
-            version = self._optional_string(raw.get("version"))
-            color = self._optional_string(raw.get("color"))
-            memory, capacity = self._memory_capacity(version)
-            original_price, original_type, current_price = self._resolve_price(raw)
-            attributes = {
-                "version": version,
-                "color": color,
-                "memory": memory,
-                "capacity": capacity,
-            }
-            sku_id = normalize_text(str(raw["sku_id"]))
-            skus.append(
-                NormalizedSku(
-                    official_sku_id=sku_id,
-                    name=" ".join(part for part in (name, version, color) if part),
-                    color=color,
-                    capacity=capacity,
-                    memory=memory,
-                    attributes=attributes,
-                    spec_fingerprint=build_spec_fingerprint(attributes),
-                    offers=[
-                        NormalizedOffer(
-                            official_offer_id=sku_id,
-                            source_url=self._optional_string(raw.get("source_url"))
-                            or parsed.source_url,
-                            original_price=original_price,
-                            original_price_type=original_type,
-                            current_price=current_price,
-                            availability=Availability(str(raw["availability"])),
-                        )
-                    ],
-                )
-            )
-        return NormalizedProduct(
+        return ParsedCatalogProduct(
             brand_code=self.brand_code,
-            channel_code=self.channel_code,
-            category_code=category,
-            official_product_id=item.official_product_id,
+            category_code=item.category_code,
+            external_product_id=item.external_product_id,
             name=name,
             series_name=name,
-            official_url=parsed.source_url,
-            skus=skus,
+            rows=[self._catalog_row(item, name, raw) for raw in skus],
+        )
+
+    def _catalog_row(
+        self, item: DiscoveredCatalogProduct, name: str, raw: dict[str, object]
+    ) -> ParsedCatalogRow:
+        version = self._optional_string(raw.get("version"))
+        color = self._optional_string(raw.get("color"))
+        memory, capacity = self._memory_capacity(version)
+        dimensions = raw.get("dimensions")
+        dimensions = dimensions if isinstance(dimensions, dict) else {}
+        attributes = {
+            str(key): normalize_text(str(value))
+            for key, value in dimensions.items()
+            if value is not None and str(value).strip()
+        }
+        connectivity = attributes.get("网络") or attributes.get("connectivity")
+        size = attributes.get("尺寸") or attributes.get("size")
+        specification = DeviceSpecification(
+            color=color,
+            memory=memory,
+            capacity=capacity,
+            edition=version,
+            connectivity=connectivity,
+            size=size,
+            attributes={
+                key: value
+                for key, value in attributes.items()
+                if key
+                not in {"color", "颜色", "version", "版本", "网络", "connectivity", "尺寸", "size"}
+            },
+        )
+        sku_id = normalize_text(str(raw["sku_id"]))
+        source_url = self._optional_string(raw.get("source_url")) or item.url
+        self._require_product_path(source_url)
+        availability = Availability(str(raw["availability"]))
+        if raw.get("current_text") is None:
+            if availability not in {
+                Availability.OFF_SHELF,
+                Availability.OUT_OF_STOCK,
+                Availability.COMING_SOON,
+            }:
+                raise OppoParseError("OPPO SKU lacks direct price or explicit unavailable state")
+            candidate = SourcePriceCandidate(
+                price_type=PriceType.AVAILABILITY_ONLY,
+                pricing_basis=PricingBasis.UNKNOWN,
+                availability=availability,
+                fee_status=FeeStatus.NOT_APPLICABLE,
+            )
+        else:
+            original, original_type, current = self._resolve_price(raw)
+            candidate = SourcePriceCandidate(
+                current_price=current,
+                original_price=original,
+                original_price_type=original_type,
+                price_type=PriceType.DIRECT_UNCONDITIONAL,
+                pricing_basis=PricingBasis.PACKAGE_TOTAL,
+                availability=availability,
+                fee_status=FeeStatus.ITEM_ONLY,
+                displayed_price_text=str(raw["current_text"]),
+            )
+        return ParsedCatalogRow(
+            item=DiscoveredCatalogListing(
+                listing_key=device_listing_key(
+                    product_id=item.external_product_id, sku_id=sku_id, specification=specification
+                ),
+                url=source_url,
+                category_code=item.category_code,
+                merchant=SourceMerchant(
+                    merchant_key=self.channel_code,
+                    name="OPPO 中国大陆官方商城",
+                    seller_type=SellerType.BRAND_OFFICIAL,
+                    verification_status=VerificationStatus.VERIFIED,
+                ),
+                price_nature=PriceNature.RETAIL_OFFER,
+                external_product_id=item.external_product_id,
+                external_sku_id=sku_id,
+            ),
+            parsed=ParsedCatalogListing(
+                source_title=" ".join(part for part in (name, version, color) if part),
+                source_category_path=item.category_code,
+                source_attributes={"device_specification": specification.identity_attributes()},
+                price_candidates=[candidate],
+            ),
         )
 
     @classmethod
-    def parse_discovery(cls, body: bytes, page_url: str) -> list[DiscoveredProduct]:
+    def parse_discovery(cls, body: bytes, page_url: str) -> list[DiscoveredCatalogProduct]:
+        cls._require_origin(page_url)
         try:
             payload = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -277,7 +388,7 @@ class OppoAdapter(BrandAdapter):
             return cls._parse_json_discovery(payload)
 
         root = parse_html(body)
-        items: dict[str, DiscoveredProduct] = {}
+        items: dict[str, DiscoveredCatalogProduct] = {}
         for anchor in root.find_all(lambda node: node.tag == "a" and bool(node.attrs.get("href"))):
             href = urljoin(page_url, anchor.attrs["href"])
             parsed = urlsplit(href)
@@ -291,8 +402,8 @@ class OppoAdapter(BrandAdapter):
             product_id = match.group(1)
             items.setdefault(
                 product_id,
-                DiscoveredProduct(
-                    official_product_id=product_id,
+                DiscoveredCatalogProduct(
+                    external_product_id=product_id,
                     url=f"https://www.opposhop.cn/cn/web/products/{product_id}.html",
                     category_code=category,
                     metadata={"discovered_name": name},
@@ -301,8 +412,10 @@ class OppoAdapter(BrandAdapter):
         return list(items.values())
 
     @classmethod
-    def _parse_json_discovery(cls, payload: object) -> list[DiscoveredProduct]:
-        items: dict[str, DiscoveredProduct] = {}
+    def _parse_json_discovery(cls, payload: object) -> list[DiscoveredCatalogProduct]:
+        if isinstance(payload, dict) and "code" in payload and payload["code"] != 200:
+            raise OppoParseError("OPPO discovery API response is unsuccessful")
+        items: dict[str, DiscoveredCatalogProduct] = {}
 
         def visit(value: object) -> None:
             if isinstance(value, list):
@@ -318,8 +431,8 @@ class OppoAdapter(BrandAdapter):
             if product_id.isdigit() and sku_id.isdigit() and category is not None:
                 items.setdefault(
                     product_id,
-                    DiscoveredProduct(
-                        official_product_id=product_id,
+                    DiscoveredCatalogProduct(
+                        external_product_id=product_id,
                         url=cls._detail_url(sku_id),
                         category_code=category,
                         metadata={"discovered_name": name, "seed_sku_id": sku_id},
@@ -330,6 +443,67 @@ class OppoAdapter(BrandAdapter):
 
         visit(payload)
         return list(items.values())
+
+    @classmethod
+    def _validate_product(cls, item: DiscoveredCatalogProduct) -> None:
+        cls._require_product_path(item.url)
+        if (
+            not item.external_product_id.isdigit()
+            or item.category_code not in cls.default_category_codes
+        ):
+            raise OppoParseError("OPPO product identity or category is invalid")
+        parsed = urlsplit(item.url)
+        if parsed.path not in {
+            OPPO_DETAIL_PATH,
+            f"/cn/web/products/{item.external_product_id}.html",
+        }:
+            raise OppoParseError("OPPO product URL disagrees with product identity")
+
+    @staticmethod
+    def _require_origin(url: str) -> None:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.hostname != "www.opposhop.cn"
+            or parsed.username
+            or parsed.password
+            or parsed.port not in {None, 443}
+        ):
+            raise OppoParseError("OPPO URL is outside the official origin")
+
+    @classmethod
+    def _require_same_url(cls, expected: str, actual: str) -> None:
+        cls._require_origin(actual)
+        first, second = urlsplit(expected), urlsplit(actual)
+        if first.path != second.path or parse_qs(first.query) != parse_qs(second.query):
+            raise OppoParseError("OPPO response URL differs from its request")
+
+    @staticmethod
+    def _request_evidence(result: FetchResult) -> dict[str, object]:
+        return {
+            "request_url": result.request_url,
+            "final_url": result.final_url,
+            "status_code": result.status_code,
+            "fetched_at": result.fetched_at.isoformat(),
+            "source_hash": result.source_hash,
+            "body": result.body.decode("utf-8"),
+        }
+
+    @classmethod
+    def _selected_dimensions(cls, raw: dict[str, object]) -> dict[str, str]:
+        selected = raw.get("skuAttributes")
+        if not isinstance(selected, dict):
+            return {}
+        labels = cls._attribute_labels(raw.get("attributeList"))
+        # Retain every selected official dimension, including fixed bundle/style
+        # options. Unknown labels stay as source keys rather than being discarded.
+        result: dict[str, str] = {}
+        for key, value in selected.items():
+            label = labels.get(str(key), str(key))
+            if not isinstance(value, (str, int)) or not str(value).strip() or label in result:
+                raise OppoParseError("OPPO selected configuration is incomplete or ambiguous")
+            result[label] = normalize_text(str(value))
+        return result
 
     @staticmethod
     def _response_payload(body: bytes) -> dict[str, object]:
@@ -353,7 +527,13 @@ class OppoAdapter(BrandAdapter):
     def _variant_sku_ids(cls, current: dict[str, object]) -> list[str]:
         selected = current.get("skuAttributes")
         selected = selected if isinstance(selected, dict) else {}
-        device_keys, fixed_keys = cls._attribute_keys(current.get("attributeList"))
+        labels = cls._attribute_labels(current.get("attributeList"))
+        device_keys = {
+            key
+            for key, label in labels.items()
+            if label in {"颜色", "版本", "规格", "尺寸", "网络", "款式"}
+        }
+        fixed_keys = set(labels) - device_keys
         found: dict[str, None] = {}
 
         def visit(value: object) -> None:
@@ -365,10 +545,16 @@ class OppoAdapter(BrandAdapter):
                 return
             sku_id = normalize_text(str(value.get("skuId", "")))
             attributes = value.get("attributes")
-            if sku_id.isdigit() and isinstance(attributes, dict):
+            if "skuId" in value:
+                if not sku_id.isdigit() or not isinstance(attributes, dict):
+                    raise OppoParseError(
+                        "OPPO advertised SKU identity or specifications are invalid"
+                    )
                 has_device_spec = not device_keys or all(key in attributes for key in device_keys)
                 fixed_match = all(attributes.get(key) == selected.get(key) for key in fixed_keys)
-                if has_device_spec and fixed_match:
+                if fixed_match:
+                    if not has_device_spec:
+                        raise OppoParseError("OPPO advertised SKU omits required dimensions")
                     found.setdefault(sku_id, None)
             for child in value.values():
                 visit(child)
@@ -377,10 +563,12 @@ class OppoAdapter(BrandAdapter):
         current_sku = normalize_text(str(current.get("skuId", "")))
         if current_sku.isdigit():
             found.setdefault(current_sku, None)
+        if not found or len(found) > 128:
+            raise OppoParseError("OPPO SKU count is empty or exceeds the safety limit")
         return list(found)
 
     @staticmethod
-    def _attribute_keys(value: object) -> tuple[set[str], set[str]]:
+    def _attribute_labels(value: object) -> dict[str, str]:
         labels: dict[str, str] = {}
         if isinstance(value, list):
             for group in value:
@@ -392,11 +580,12 @@ class OppoAdapter(BrandAdapter):
                         key = normalize_text(str(entry.get("key", "")))
                         label = normalize_text(str(entry.get("_$text1", "")))
                         if key and label:
+                            if key in labels and labels[key] != label:
+                                raise OppoParseError(
+                                    "OPPO specification key has conflicting labels"
+                                )
                             labels[key] = label
-        device_keys = {
-            key for key, label in labels.items() if label in {"颜色", "版本", "规格", "尺寸"}
-        }
-        return device_keys, set(labels) - device_keys
+        return labels
 
     @staticmethod
     def _detail_url(sku_id: str) -> str:
@@ -428,8 +617,8 @@ class OppoAdapter(BrandAdapter):
             return "PHONE"
         return None
 
-    @staticmethod
-    def _snapshots(body: bytes) -> list[object]:
+    @classmethod
+    def _snapshots(cls, body: bytes, source_url: str) -> list[object]:
         try:
             envelope = json.loads(body)
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -442,6 +631,7 @@ class OppoAdapter(BrandAdapter):
             or not snapshots
         ):
             raise OppoParseError("OPPO snapshot evidence schema is unsupported")
+        cls._require_same_url(source_url, str(envelope.get("source_url", "")))
         return snapshots
 
     @staticmethod
@@ -505,8 +695,9 @@ class OppoAdapter(BrandAdapter):
             return Availability.ON_SALE
         return Availability.UNKNOWN
 
-    @staticmethod
-    def _require_product_path(url: str) -> None:
+    @classmethod
+    def _require_product_path(cls, url: str) -> None:
+        cls._require_origin(url)
         parsed = urlsplit(url)
         legacy = re.fullmatch(r"/cn/web/products/\d+\.html", parsed.path) is not None
         query = parse_qs(parsed.query)

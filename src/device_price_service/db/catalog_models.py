@@ -661,6 +661,13 @@ class CatalogPriceObservationRecord(Base):
         ),
         CheckConstraint(
             "quality_status <> 'ACCEPTED' OR "
+            "((price_type = 'AVAILABILITY_ONLY' "
+            "AND price_nature = 'RETAIL_OFFER' AND region_scope <> 'UNKNOWN' "
+            "AND availability IN ('OFF_SHELF','OUT_OF_STOCK','COMING_SOON') "
+            "AND current_price IS NULL AND original_price IS NULL "
+            "AND original_price_type = 'NONE' AND unit_price IS NULL "
+            "AND unit_price_unit IS NULL AND pricing_basis = 'UNKNOWN' "
+            "AND fee_status = 'NOT_APPLICABLE' AND promotion_label IS NULL) OR "
             "(current_price IS NOT NULL AND region_scope <> 'UNKNOWN' "
             "AND price_nature <> 'UNKNOWN' "
             "AND pricing_basis IN ('PACKAGE_TOTAL','UNIT_QUOTED') "
@@ -670,7 +677,7 @@ class CatalogPriceObservationRecord(Base):
             "AND fee_status IN ('ITEM_ONLY','SEPARATE_FEES_EXCLUDED')) "
             "OR (price_nature IN ('RETAIL_AVERAGE','WHOLESALE_AVERAGE','MARKET_AVERAGE') "
             "AND price_type = 'PUBLISHED_VALUE' "
-            "AND fee_status = 'NOT_APPLICABLE')))",
+            "AND fee_status = 'NOT_APPLICABLE'))))",
             name="accepted_eligibility",
         ),
         CheckConstraint(

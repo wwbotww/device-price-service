@@ -155,7 +155,11 @@ def _build_source(
             quality_status=QualityStatus.ACCEPTED,
             observed_at=observed_at,
         )
-        catalog.set_current_revision(source_listing_id=listing.id, revision_id=revision.id)
+        catalog.set_current_revision(
+            source_listing_id=listing.id,
+            revision_id=revision.id,
+            observed_at=observed_at,
+        )
         return SourceFixture(listing.id, revision.id, record.id, observed_at)
 
 
@@ -431,7 +435,11 @@ def test_listing_identity_switch_invalidates_old_projection(
             quality_status=QualityStatus.ACCEPTED,
             observed_at=fixture.observed_at + timedelta(minutes=10),
         )
-        catalog.set_current_revision(source_listing_id=fixture.listing_id, revision_id=revision.id)
+        catalog.set_current_revision(
+            source_listing_id=fixture.listing_id,
+            revision_id=revision.id,
+            observed_at=revision.first_observed_at,
+        )
         assert session.scalar(select(func.count()).select_from(CatalogPriceCurrent)) == 0
 
         result = CatalogPriceRepository(session).record(

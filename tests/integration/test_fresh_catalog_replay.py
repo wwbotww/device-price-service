@@ -13,7 +13,7 @@ from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from device_price_service.crawlers.base import AdapterContext
-from device_price_service.crawlers.catalog import CatalogConnector
+from device_price_service.crawlers.catalog import CatalogDatasetConnector
 from device_price_service.db.catalog_models import (
     CatalogCrawlRecord,
     CatalogPriceCurrent,
@@ -31,8 +31,11 @@ from device_price_service.db.catalog_seed import seed_fresh_categories
 from device_price_service.domain.catalog_crawl import (
     CatalogCollectionRequest,
     CatalogRegion,
+    DiscoveredCatalogDataset,
     DiscoveredCatalogListing,
+    ParsedCatalogDataset,
     ParsedCatalogListing,
+    ParsedCatalogRow,
     SourceMerchant,
     SourcePriceCandidate,
 )
@@ -87,7 +90,7 @@ class FixtureReplayFetcher:
         )
 
 
-class JsonFixtureConnector(CatalogConnector):
+class JsonFixtureConnector(CatalogDatasetConnector):
     version = "phase-d-fixture-1"
     fetch_method = CollectionFetchMethod.REPLAY
 
@@ -97,17 +100,38 @@ class JsonFixtureConnector(CatalogConnector):
         channel_code: str,
         connector_code: str,
         discovery_path: Path,
+        selection: int = 0,
     ) -> None:
         self.channel_code = channel_code
         self.connector_code = connector_code
         self.discovery_path = discovery_path
+        self.selection = selection
+        document = json.loads(discovery_path.read_bytes())
+        self.allowed_domains = tuple(
+            sorted({urlsplit(row["url"]).hostname for row in document["listings"]})
+        )
+        self.default_category_codes = tuple(
+            sorted({row["category_code"] for row in document["listings"]})
+        )
 
-    async def discover(
+    async def discover_dataset(
         self,
         context: AdapterContext,
         request: CatalogCollectionRequest,
-    ) -> list[DiscoveredCatalogListing]:
+    ) -> DiscoveredCatalogDataset:
         document = json.loads(self.discovery_path.read_bytes())
+        row = document["listings"][self.selection]
+        return DiscoveredCatalogDataset(
+            dataset_key=row["listing_key"],
+            url=row["url"],
+            source_page_url=row["url"],
+            source_observed_at=BASE_OBSERVED_AT,
+            metadata={"listing": row, "merchant": document["merchant"]},
+        )
+
+    @staticmethod
+    def _listing(dataset: DiscoveredCatalogDataset) -> DiscoveredCatalogListing:
+        document = dataset.metadata
         merchant_data = document["merchant"]
         merchant = SourceMerchant(
             merchant_key=merchant_data["merchant_key"],
@@ -116,37 +140,38 @@ class JsonFixtureConnector(CatalogConnector):
             seller_type=SellerType(merchant_data["seller_type"]),
             verification_status=VerificationStatus(merchant_data["verification_status"]),
         )
-        return [
-            DiscoveredCatalogListing(
-                listing_key=row["listing_key"],
-                url=row["url"],
-                category_code=row["category_code"],
-                merchant=merchant,
-                price_nature=PriceNature(row["price_nature"]),
-                external_product_id=row["external_product_id"],
-                external_sku_id=row["external_sku_id"],
-            )
-            for row in document["listings"]
-        ]
+        row = document["listing"]
+        return DiscoveredCatalogListing(
+            listing_key=row["listing_key"],
+            url=row["url"],
+            category_code=row["category_code"],
+            merchant=merchant,
+            price_nature=PriceNature(row["price_nature"]),
+            external_product_id=row["external_product_id"],
+            external_sku_id=row["external_sku_id"],
+        )
 
-    async def fetch_listing(
+    async def fetch_dataset(
         self,
         context: AdapterContext,
-        item: DiscoveredCatalogListing,
+        dataset: DiscoveredCatalogDataset,
     ) -> FetchResult:
-        return await context.http.fetch(item.url, allowed_domains=context.allowed_domains)
+        return await context.http.fetch(dataset.url, allowed_domains=context.allowed_domains)
 
-    def parse_listing(
+    def parse_dataset(
         self,
-        item: DiscoveredCatalogListing,
+        dataset: DiscoveredCatalogDataset,
         result: FetchResult,
-    ) -> ParsedCatalogListing:
+    ) -> ParsedCatalogDataset:
         document = json.loads(result.body)
-        return ParsedCatalogListing(
+        parsed = ParsedCatalogListing(
             source_title=document["title"],
             source_category_path=document["category_path"],
             source_attributes=document["attributes"],
             price_candidates=[self._price(row) for row in document["prices"]],
+        )
+        return ParsedCatalogDataset(
+            rows=[ParsedCatalogRow(item=self._listing(dataset), parsed=parsed)]
         )
 
     @staticmethod
@@ -165,9 +190,7 @@ class JsonFixtureConnector(CatalogConnector):
                 Decimal(row["current_price"]) if row.get("current_price") is not None else None
             ),
             original_price=(
-                Decimal(row["original_price"])
-                if row.get("original_price") is not None
-                else None
+                Decimal(row["original_price"]) if row.get("original_price") is not None else None
             ),
             original_price_type=OriginalPriceType(row["original_price_type"]),
             price_type=PriceType(row["price_type"]),
@@ -265,20 +288,22 @@ def test_desensitized_fresh_and_public_market_fixtures_replay_end_to_end(
     paths = {
         "https://fresh.example.test/items/apple-5kg": FIXTURE_ROOT / "apple_5kg.json",
         "https://fresh.example.test/items/egg-30": FIXTURE_ROOT / "egg_30.json",
-        "https://fresh.example.test/items/pork-belly-500g": (
-            FIXTURE_ROOT / "pork_belly_500g.json"
-        ),
+        "https://fresh.example.test/items/pork-belly-500g": (FIXTURE_ROOT / "pork_belly_500g.json"),
         "https://market.example.test/prices/red-fuji-grade1": (
             FIXTURE_ROOT / "public_market_apple.json"
         ),
     }
     fetcher = FixtureReplayFetcher(paths)
     pipeline = _pipeline(mysql_engine, session_factory, fetcher, tmp_path / "raw")
-    commerce = JsonFixtureConnector(
-        channel_code="FRESH_FIXTURE",
-        connector_code="fresh-fixture",
-        discovery_path=FIXTURE_ROOT / "ecommerce_discovery.json",
-    )
+    commerce = [
+        JsonFixtureConnector(
+            channel_code="FRESH_FIXTURE",
+            connector_code="fresh-fixture",
+            discovery_path=FIXTURE_ROOT / "ecommerce_discovery.json",
+            selection=index,
+        )
+        for index in range(3)
+    ]
     market = JsonFixtureConnector(
         channel_code="MARKET_FIXTURE",
         connector_code="market-fixture",
@@ -295,23 +320,29 @@ def test_desensitized_fresh_and_public_market_fixtures_replay_end_to_end(
         category_codes=("FRESH_APPLE",),
     )
 
-    commerce_first = asyncio.run(pipeline.run(commerce, commerce_request))
-    commerce_second = asyncio.run(pipeline.run(commerce, commerce_request))
-    market_first = asyncio.run(pipeline.run(market, market_request))
-    market_second = asyncio.run(pipeline.run(market, market_request))
+    commerce_first = [
+        asyncio.run(pipeline.run_dataset(connector, commerce_request)) for connector in commerce
+    ]
+    commerce_second = [
+        asyncio.run(pipeline.run_dataset(connector, commerce_request)) for connector in commerce
+    ]
+    market_first = asyncio.run(pipeline.run_dataset(market, market_request))
+    market_second = asyncio.run(pipeline.run_dataset(market, market_request))
 
-    assert commerce_first.accepted_count == commerce_second.accepted_count == 3
-    assert commerce_first.rejected_count == commerce_second.rejected_count == 1
+    assert sum(run.accepted_count for run in commerce_first) == 3
+    assert sum(run.accepted_count for run in commerce_second) == 3
+    assert sum(run.rejected_count for run in commerce_first) == 1
+    assert sum(run.rejected_count for run in commerce_second) == 1
     assert market_first.accepted_count == market_second.accepted_count == 1
-    assert commerce_first.failed_count == market_first.failed_count == 0
+    assert all(run.failed_count == 0 for run in commerce_first)
+    assert market_first.failed_count == 0
+    assert all(run.status == "SUCCEEDED" for run in commerce_first + commerce_second)
 
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(Merchant)) == 2
         assert session.scalar(select(func.count()).select_from(SourceListing)) == 4
         assert session.scalar(select(func.count()).select_from(ListingRevision)) == 4
-        assert (
-            session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 10
-        )
+        assert session.scalar(select(func.count()).select_from(CatalogPriceObservationRecord)) == 10
         assert session.scalar(select(func.count()).select_from(CatalogPriceCurrent)) == 4
 
         accepted_current = session.execute(

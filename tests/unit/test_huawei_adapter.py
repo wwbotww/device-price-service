@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from device_price_service.crawlers.huawei import HUAWEI_SNAPSHOT_PLAN, HuaweiAdapter
-from device_price_service.domain.crawl import DiscoveredProduct, FetchResult
+from device_price_service.crawlers.huawei import HUAWEI_SNAPSHOT_PLAN, HuaweiCatalogConnector
+from device_price_service.domain.catalog_crawl import DiscoveredCatalogProduct
+from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.enums import Availability, FetchMethod, OriginalPriceType
 from device_price_service.domain.price_policy import ConditionalPriceError
 
@@ -29,11 +30,11 @@ def _result(filename: str) -> FetchResult:
 
 
 def test_huawei_discovers_only_core_huawei_devices() -> None:
-    items = HuaweiAdapter.parse_discovery(
+    items = HuaweiCatalogConnector.parse_discovery(
         (FIXTURES / "discovery.html").read_bytes(), "https://www.vmall.com/"
     )
 
-    assert [(item.official_product_id, item.category_code) for item in items] == [
+    assert [(item.external_product_id, item.category_code) for item in items] == [
         ("42001", "PHONE"),
         ("42002", "TABLET"),
         ("42003", "LAPTOP"),
@@ -63,9 +64,9 @@ def test_huawei_discovers_current_openapi_products() -> None:
         }
     ).encode()
 
-    items = HuaweiAdapter.parse_discovery(body, "https://openapi.vmall.com/example")
+    items = HuaweiCatalogConnector.parse_discovery(body, "https://openapi.vmall.com/example")
 
-    assert [(item.official_product_id, item.category_code) for item in items] == [
+    assert [(item.external_product_id, item.category_code) for item in items] == [
         ("10001", "PHONE"),
         ("10002", "WATCH"),
     ]
@@ -146,52 +147,56 @@ def test_huawei_parses_current_next_product_evidence() -> None:
         duration_ms=5,
         fetch_method=FetchMethod.REPLAY,
     )
-    adapter = HuaweiAdapter()
-    item = DiscoveredProduct(
-        official_product_id="10001",
+    adapter = HuaweiCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="10001",
         url=NEXT_PRODUCT_URL,
         category_code="LAPTOP",
     )
 
-    product = adapter.normalize(item, adapter.parse_product(item, result))
-
-    assert len(product.skus) == 3
-    assert product.skus[0].official_sku_id == "280101"
-    assert product.skus[0].memory == "24GB"
-    assert product.skus[0].capacity == "512GB"
-    assert product.skus[0].color == "天际白"
-    assert product.skus[0].offers[0].current_price == Decimal("24999.00")
-    assert product.skus[0].offers[0].original_price is None
-    assert product.skus[0].offers[0].availability is Availability.UNKNOWN
-    assert product.skus[1].memory == "32GB"
-    assert product.skus[1].capacity == "1TB"
-    assert product.skus[1].spec_fingerprint != product.skus[0].spec_fingerprint
-    assert product.skus[2].spec_fingerprint != product.skus[1].spec_fingerprint
-    assert product.skus[2].attributes["official_attributes"]["款式"] == "柔光屏"
+    product = adapter.parse_product(item, result)
+    specs = [row.parsed.source_attributes["device_specification"] for row in product.rows]
+    prices = [row.parsed.price_candidates[0] for row in product.rows]
+    assert len(product.rows) == 3
+    assert product.rows[0].item.external_sku_id == "280101"
+    assert product.rows[1].item.url.endswith("prdId=10001&sbomCode=280102")
+    assert specs[0]["memory"] == "24GB"
+    assert specs[0]["capacity"] == "512GB"
+    assert specs[0]["color"] == "天际白"
+    assert "manufacturer_part_number" not in specs[0]
+    assert prices[0].current_price == Decimal("24999.00")
+    assert prices[0].original_price is None
+    assert prices[0].availability is Availability.UNKNOWN
+    assert specs[1]["memory"] == "32GB"
+    assert specs[1]["capacity"] == "1TB"
+    assert specs[0] != specs[1] != specs[2]
+    assert specs[2]["attributes"]["款式"] == "柔光屏"
+    assert all(price.source_observed_at is None and price.evidence_hash is None for price in prices)
 
 
 def test_huawei_normalizes_direct_prices_and_ignores_subsidy_copy() -> None:
-    adapter = HuaweiAdapter()
-    item = DiscoveredProduct(official_product_id="42002", url=PRODUCT_URL, category_code="TABLET")
-    product = adapter.normalize(
-        item, adapter.parse_product(item, _result("product_snapshots.json"))
+    adapter = HuaweiCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="42002", url=PRODUCT_URL, category_code="TABLET"
     )
-
-    assert len(product.skus) == 2
-    assert product.skus[0].official_sku_id == "HW-42002-8256-G"
-    assert product.skus[0].memory == "8GB"
-    assert product.skus[0].capacity == "256GB"
-    assert product.skus[0].offers[0].current_price == Decimal("2999.00")
-    assert product.skus[0].offers[0].original_price is None
-    assert product.skus[1].offers[0].original_price == Decimal("4299.00")
-    assert product.skus[1].offers[0].original_price_type is OriginalPriceType.CROSSED_OUT
-    assert product.skus[1].offers[0].availability is Availability.OUT_OF_STOCK
+    product = adapter.parse_product(item, _result("product_snapshots.json"))
+    specs = [row.parsed.source_attributes["device_specification"] for row in product.rows]
+    prices = [row.parsed.price_candidates[0] for row in product.rows]
+    assert len(product.rows) == 2
+    assert product.rows[0].item.external_sku_id == "HW-42002-8256-G"
+    assert specs[0]["memory"] == "8GB"
+    assert specs[0]["capacity"] == "256GB"
+    assert prices[0].current_price == Decimal("2999.00")
+    assert prices[0].original_price is None
+    assert prices[1].original_price == Decimal("4299.00")
+    assert prices[1].original_price_type is OriginalPriceType.CROSSED_OUT
+    assert prices[1].availability is Availability.OUT_OF_STOCK
 
 
 def test_huawei_rejects_subsidized_selected_price() -> None:
-    adapter = HuaweiAdapter()
-    item = DiscoveredProduct(official_product_id="42002", url=PRODUCT_URL, category_code="TABLET")
-    parsed = adapter.parse_product(item, _result("product_conditional_price.json"))
-
+    adapter = HuaweiCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="42002", url=PRODUCT_URL, category_code="TABLET"
+    )
     with pytest.raises(ConditionalPriceError, match="conditional price"):
-        adapter.normalize(item, parsed)
+        adapter.parse_product(item, _result("product_conditional_price.json"))

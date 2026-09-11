@@ -26,6 +26,8 @@ def mysql_engine() -> Iterator[Engine]:
         mysql_user=os.getenv("TEST_MYSQL_USER", "device_price"),
         mysql_password=os.getenv("TEST_MYSQL_PASSWORD", "device-price-local"),
     )
+    if settings.mysql_database != "device_price_test":
+        pytest.fail("destructive integration tests require the dedicated device_price_test schema")
     engine = create_database_engine(settings)
     yield engine
     engine.dispose()
@@ -50,4 +52,7 @@ def migrated_session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Sess
     command.upgrade(config, "head")
     factory = create_session_factory(mysql_engine)
     yield factory
-    command.downgrade(config, "base")
+    # Fixture cleanup is deliberately destructive inside the guarded test schema.
+    # Production downgrades refuse to discard new device evidence/state facts.
+    Base.metadata.drop_all(mysql_engine)
+    command.stamp(config, "base", purge=True)

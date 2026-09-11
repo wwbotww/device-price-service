@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from device_price_service.crawlers.xiaomi import XIAOMI_SNAPSHOT_PLAN, XiaomiAdapter
-from device_price_service.domain.crawl import DiscoveredProduct, FetchResult
+from device_price_service.crawlers.xiaomi import XIAOMI_SNAPSHOT_PLAN, XiaomiCatalogConnector
+from device_price_service.domain.catalog_crawl import DiscoveredCatalogProduct
+from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.enums import Availability, FetchMethod, OriginalPriceType
 from device_price_service.domain.price_policy import ConditionalPriceError
 
@@ -31,12 +32,12 @@ def _result(filename: str) -> FetchResult:
 
 
 def test_xiaomi_discovers_only_core_xiaomi_devices() -> None:
-    items = XiaomiAdapter.parse_discovery(
+    items = XiaomiCatalogConnector.parse_discovery(
         (FIXTURES / "discovery.html").read_bytes(),
         "https://www.mi.com/shop/",
     )
 
-    assert [(item.official_product_id, item.category_code) for item in items] == [
+    assert [(item.external_product_id, item.category_code) for item in items] == [
         ("91001", "PHONE"),
         ("91002", "TABLET"),
         ("91003", "LAPTOP"),
@@ -55,7 +56,7 @@ def test_xiaomi_snapshot_plan_enumerates_only_device_specs_and_colors() -> None:
 
 
 def test_xiaomi_parses_current_slash_separated_laptop_spec() -> None:
-    assert XiaomiAdapter._version_attributes("Ultra5-325/24GB/1TB") == (
+    assert XiaomiCatalogConnector._version_attributes("Ultra5-325/24GB/1TB") == (
         "24GB",
         "1TB",
         "Ultra5-325",
@@ -70,7 +71,7 @@ def test_xiaomi_accepts_single_spec_device_without_version_dimension() -> None:
     body = json.dumps(
         {
             "schema": "device-price-browser-snapshots-v1",
-            "source_url": "https://www.mi.com/shop/buy/detail?product_id=91005",
+            "source_url": PRODUCT_URL,
             "snapshots": [{"selections": {"color": "黑色"}, "html": html}],
         },
         ensure_ascii=False,
@@ -85,53 +86,55 @@ def test_xiaomi_accepts_single_spec_device_without_version_dimension() -> None:
         duration_ms=5,
         fetch_method=FetchMethod.REPLAY,
     )
-    item = DiscoveredProduct(
-        official_product_id="91005",
+    item = DiscoveredCatalogProduct(
+        external_product_id="91002",
         url=PRODUCT_URL,
         category_code="WATCH",
     )
-    adapter = XiaomiAdapter()
+    adapter = XiaomiCatalogConnector()
 
-    product = adapter.normalize(item, adapter.parse_product(item, result))
+    product = adapter.parse_product(item, result)
 
-    assert product.skus[0].color == "黑色"
-    assert product.skus[0].attributes["version"] == ""
-    assert product.skus[0].offers[0].current_price == Decimal("1299.00")
+    assert product.rows[0].parsed.source_attributes["device_specification"] == {"color": "黑色"}
+    assert product.rows[0].parsed.price_candidates[0].current_price == Decimal("1299.00")
 
 
 def test_xiaomi_parses_and_normalizes_rendered_variant_snapshots() -> None:
-    adapter = XiaomiAdapter()
-    item = DiscoveredProduct(
-        official_product_id="91002",
+    adapter = XiaomiCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="91002",
         url=PRODUCT_URL,
         category_code="TABLET",
     )
-    parsed = adapter.parse_product(item, _result("product_snapshots.json"))
-    product = adapter.normalize(item, parsed)
+    product = adapter.parse_product(item, _result("product_snapshots.json"))
 
     assert product.name == "Xiaomi Pad Fixture"
-    assert len(product.skus) == 3
-    assert product.skus[0].memory == "8GB"
-    assert product.skus[0].capacity == "128GB"
-    assert product.skus[0].offers[0].current_price == Decimal("2999.00")
-    assert product.skus[0].offers[0].original_price is None
-    assert product.skus[1].offers[0].original_price == Decimal("3499.00")
-    assert product.skus[1].offers[0].original_price_type is OriginalPriceType.CROSSED_OUT
-    assert product.skus[2].attributes["edition"] == "柔光版"
-    assert product.skus[2].offers[0].availability is Availability.OUT_OF_STOCK
-    assert all(sku.attributes["bundle"] == "标准版" for sku in product.skus)
+    assert len(product.rows) == 3
+    specs = [row.parsed.source_attributes["device_specification"] for row in product.rows]
+    prices = [row.parsed.price_candidates[0] for row in product.rows]
+    assert specs[0]["memory"] == "8GB"
+    assert specs[0]["capacity"] == "128GB"
+    assert prices[0].current_price == Decimal("2999.00")
+    assert prices[0].original_price is None
+    assert prices[1].original_price == Decimal("3499.00")
+    assert prices[1].original_price_type is OriginalPriceType.CROSSED_OUT
+    assert specs[2]["edition"] == "柔光版"
+    assert prices[2].availability is Availability.OUT_OF_STOCK
+    assert all(row.item.external_sku_id is None for row in product.rows)
+    assert all('"spec"' in row.item.listing_key for row in product.rows)
+    assert all(price.source_observed_at is None and price.evidence_hash is None for price in prices)
+    assert all("bundle" not in spec.get("attributes", {}) for spec in specs)
 
 
 def test_xiaomi_ignores_conditional_marketing_copy_but_rejects_conditional_price() -> None:
-    adapter = XiaomiAdapter()
-    item = DiscoveredProduct(
-        official_product_id="91002",
+    adapter = XiaomiCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="91002",
         url=PRODUCT_URL,
         category_code="TABLET",
     )
-    normal = adapter.normalize(item, adapter.parse_product(item, _result("product_snapshots.json")))
-    assert normal.skus[0].offers[0].current_price == Decimal("2999.00")
+    normal = adapter.parse_product(item, _result("product_snapshots.json"))
+    assert normal.rows[0].parsed.price_candidates[0].current_price == Decimal("2999.00")
 
-    conditional = adapter.parse_product(item, _result("product_conditional_price.json"))
     with pytest.raises(ConditionalPriceError, match="conditional price"):
-        adapter.normalize(item, conditional)
+        adapter.parse_product(item, _result("product_conditional_price.json"))

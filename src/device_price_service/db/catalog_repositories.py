@@ -276,7 +276,11 @@ class GeneralCatalogRepository:
                 status=status.value,
             ),
         )
-        if not created and (item.category_id != category_id or item.item_type != item_type.value):
+        if not created and (
+            item.category_id != category_id
+            or item.item_type != item_type.value
+            or item.brand_id != brand_id
+        ):
             raise CatalogIdentityConflictError(
                 f"catalog item key {key!r} has incompatible identity"
             )
@@ -416,6 +420,7 @@ class GeneralCatalogRepository:
         observed_at: datetime,
         external_merchant_id: str | None = None,
         status: LifecycleStatus = LifecycleStatus.ACTIVE,
+        refresh_current: bool = True,
     ) -> Merchant:
         key_hash = _sha256_hex(merchant_key_hash, field_name="merchant_key_hash")
         observed = _utc_naive_milliseconds(observed_at)
@@ -440,7 +445,7 @@ class GeneralCatalogRepository:
                 last_seen_at=observed,
             ),
         )
-        if not created:
+        if not created and refresh_current and observed > merchant.last_seen_at:
             merchant.name = name.strip()
             merchant.external_merchant_id = (
                 external_merchant_id.strip()
@@ -450,6 +455,7 @@ class GeneralCatalogRepository:
             merchant.seller_type = seller_type.value
             merchant.verification_status = verification_status.value
             merchant.status = status.value
+        if not created and refresh_current:
             merchant.first_seen_at = min(merchant.first_seen_at, observed)
             merchant.last_seen_at = max(merchant.last_seen_at, observed)
         return merchant
@@ -468,6 +474,7 @@ class GeneralCatalogRepository:
         external_product_id: str | None = None,
         external_sku_id: str | None = None,
         lifecycle_status: LifecycleStatus = LifecycleStatus.ACTIVE,
+        refresh_current: bool = True,
     ) -> SourceListing:
         merchant = self.session.get(Merchant, merchant_id)
         if merchant is None or merchant.source_channel_id != source_channel_id:
@@ -506,6 +513,16 @@ class GeneralCatalogRepository:
                 raise CatalogIdentityConflictError(
                     "source listing key hash has incompatible identity"
                 )
+            for field, value in (
+                ("external_product_id", external_product_id),
+                ("external_sku_id", external_sku_id),
+            ):
+                existing_id = getattr(listing, field)
+                if existing_id is not None and value is not None and existing_id != value.strip():
+                    raise CatalogIdentityConflictError(
+                        "source listing key resolves to a different external identity"
+                    )
+        if not created and refresh_current and observed > listing.last_seen_at:
             listing.external_product_id = (
                 external_product_id.strip() if external_product_id else listing.external_product_id
             )
@@ -516,6 +533,7 @@ class GeneralCatalogRepository:
             listing.url_hash = normalized_url_hash
             listing.lifecycle_status = lifecycle_status.value
             listing.consecutive_misses = 0
+        if not created and refresh_current:
             listing.first_seen_at = min(listing.first_seen_at, observed)
             listing.last_seen_at = max(listing.last_seen_at, observed)
         return listing
@@ -676,7 +694,13 @@ class GeneralCatalogRepository:
         self.session.flush()
         return revision
 
-    def set_current_revision(self, *, source_listing_id: int, revision_id: int) -> SourceListing:
+    def set_current_revision(
+        self,
+        *,
+        source_listing_id: int,
+        revision_id: int,
+        observed_at: datetime,
+    ) -> SourceListing:
         listing = self.session.scalar(
             select(SourceListing).where(SourceListing.id == source_listing_id).with_for_update()
         )
@@ -689,12 +713,23 @@ class GeneralCatalogRepository:
             return listing
         if listing.current_revision_id is not None:
             current_revision = self.session.get(ListingRevision, listing.current_revision_id)
-            if (
-                current_revision is not None
-                and revision.last_observed_at < current_revision.last_observed_at
-            ):
-                raise CatalogConsistencyError(
-                    "an older identity revision cannot replace the current one"
+            current_time = self.session.scalar(
+                select(func.max(CatalogPriceObservationRecord.observed_at)).where(
+                    CatalogPriceObservationRecord.listing_revision_id
+                    == listing.current_revision_id,
+                    CatalogPriceObservationRecord.quality_status == QualityStatus.ACCEPTED.value,
+                )
+            )
+            if current_time is None and current_revision is not None:
+                current_time = current_revision.first_observed_at
+            # last_observed_at includes rejected/review evidence. It must not
+            # make an untrusted late quote decide which configuration is current.
+            observed = _utc_naive_milliseconds(observed_at)
+            if current_time is not None and observed < current_time:
+                return listing
+            if current_time is not None and observed == current_time:
+                raise CatalogIdentityConflictError(
+                    "different specifications share one trusted time"
                 )
         self.session.execute(
             delete(CatalogPriceCurrent).where(
@@ -925,9 +960,7 @@ class CatalogCrawlRepository:
             raise ValueError("crawl run counts cannot be negative")
         finished = _utc_naive_milliseconds(finished_at)
         run = self.session.scalar(
-            select(CatalogCrawlRun)
-            .where(CatalogCrawlRun.id == crawl_run_id)
-            .with_for_update()
+            select(CatalogCrawlRun).where(CatalogCrawlRun.id == crawl_run_id).with_for_update()
         )
         if run is None:
             raise CatalogConsistencyError(f"unknown crawl run id: {crawl_run_id}")
@@ -1091,6 +1124,37 @@ class CatalogPriceRepository:
             self.session.flush()
         return CatalogPriceWriteResult(persisted.id, current.id, True, advances)
 
+    def assert_same_time_consistent(self, observation: CatalogPriceObservation) -> None:
+        """Device fetches cannot silently revise a different quote at the same instant."""
+        prior_rows = self.session.scalars(
+            select(CatalogPriceObservationRecord)
+            .where(
+                CatalogPriceObservationRecord.source_listing_id == observation.source_listing_id,
+                CatalogPriceObservationRecord.region_scope == observation.region_scope.value,
+                CatalogPriceObservationRecord.region_code == observation.region_code,
+                CatalogPriceObservationRecord.observed_at == observation.observed_at,
+                CatalogPriceObservationRecord.quality_status == QualityStatus.ACCEPTED.value,
+            )
+            .with_for_update()
+        ).all()
+        run = self.session.scalar(
+            select(CatalogCrawlRun)
+            .join(CatalogCrawlRecord, CatalogCrawlRecord.crawl_run_id == CatalogCrawlRun.id)
+            .where(CatalogCrawlRecord.id == observation.crawl_record_id)
+        )
+        if run is None:
+            raise CatalogConsistencyError("device observation requires persisted run evidence")
+        key = observation.build_observation_key(
+            adapter_version=run.adapter_version,
+            policy_version=run.policy_version,
+        )
+        # Only exact replays reuse the point. Even equal amounts from different
+        # evidence cannot create two unlinked accepted rows that rebuild may swap.
+        if any(prior.observation_key != key for prior in prior_rows):
+            raise CatalogIdentityConflictError(
+                "conflicting device quotes at the same observation time"
+            )
+
     def resolve_same_time_correction(
         self,
         observation: CatalogPriceObservation,
@@ -1102,16 +1166,13 @@ class CatalogPriceRepository:
         prior_rows = self.session.scalars(
             select(CatalogPriceObservationRecord)
             .where(
-                CatalogPriceObservationRecord.source_listing_id
-                == observation.source_listing_id,
+                CatalogPriceObservationRecord.source_listing_id == observation.source_listing_id,
                 CatalogPriceObservationRecord.listing_revision_id
                 == observation.listing_revision_id,
-                CatalogPriceObservationRecord.region_scope
-                == observation.region_scope.value,
+                CatalogPriceObservationRecord.region_scope == observation.region_scope.value,
                 CatalogPriceObservationRecord.region_code == observation.region_code,
                 CatalogPriceObservationRecord.observed_at == observation.observed_at,
-                CatalogPriceObservationRecord.quality_status
-                == QualityStatus.ACCEPTED.value,
+                CatalogPriceObservationRecord.quality_status == QualityStatus.ACCEPTED.value,
             )
             .order_by(CatalogPriceObservationRecord.id.desc())
             .with_for_update()
@@ -1138,12 +1199,8 @@ class CatalogPriceRepository:
         }
         active_rows = [prior for prior in prior_rows if prior.id not in superseded_ids]
         if len(active_rows) != 1:
-            raise CatalogCorrectionError(
-                "same-time publication has an ambiguous correction chain"
-            )
-        return observation.model_copy(
-            update={"supersedes_observation_id": active_rows[0].id}
-        )
+            raise CatalogCorrectionError("same-time publication has an ambiguous correction chain")
+        return observation.model_copy(update={"supersedes_observation_id": active_rows[0].id})
 
     def rebuild_current(self, *, source_listing_id: int) -> int:
         listing = self.session.scalar(

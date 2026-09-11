@@ -6,7 +6,7 @@ import time
 from typing import Any, Literal
 
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Locator, Page, Route, async_playwright
+from playwright.async_api import Locator, Page, Response, Route, async_playwright
 
 from device_price_service.config import Settings
 from device_price_service.domain.crawl import (
@@ -69,24 +69,9 @@ class BrowserFetcher:
                         timeout=self.settings.browser_timeout_ms,
                     )
                     policy.validate(page.url)
-                    await page.wait_for_timeout(self.settings.browser_render_settle_ms)
-                    body = (await page.content()).encode("utf-8")
-                    if len(body) > self.settings.http_max_response_bytes:
-                        raise ResponseTooLargeError(
-                            f"rendered page exceeds {self.settings.http_max_response_bytes} bytes"
-                        )
-                    headers = await response.all_headers() if response is not None else {}
-                    status = response.status if response is not None else 0
-                    return FetchResult(
-                        request_url=url,
-                        final_url=page.url,
-                        status_code=status,
-                        headers={key.lower(): value for key, value in headers.items()},
-                        body=body,
-                        fetched_at=utc_now_naive(),
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                        fetch_method=FetchMethod.BROWSER,
-                    )
+                    if response is not None and 200 <= response.status < 300:
+                        await page.wait_for_timeout(self.settings.browser_render_settle_ms)
+                    return await self._capture_page_result(url, page, response, started)
                 finally:
                     await browser.close()
         except (PlaywrightError, UrlPolicyError) as error:
@@ -122,6 +107,10 @@ class BrowserFetcher:
                         timeout=self.settings.browser_timeout_ms,
                     )
                     policy.validate(page.url)
+                    # Error pages need not contain product selectors. Preserve their actual
+                    # evidence so the pipeline can distinguish 404/410 from access failures.
+                    if response is None or not 200 <= response.status < 300:
+                        return await self._capture_page_result(url, page, response, started)
                     await page.locator(plan.ready_selector).first.wait_for(
                         state="visible",
                         timeout=self.settings.browser_timeout_ms,
@@ -175,6 +164,30 @@ class BrowserFetcher:
                     await browser.close()
         except (PlaywrightError, UrlPolicyError) as error:
             raise BrowserFetchError(f"browser snapshot fetch failed for {url}") from error
+
+    async def _capture_page_result(
+        self,
+        url: str,
+        page: Page,
+        response: Response | None,
+        started: float,
+    ) -> FetchResult:
+        body = (await page.content()).encode("utf-8")
+        if len(body) > self.settings.http_max_response_bytes:
+            raise ResponseTooLargeError(
+                f"rendered page exceeds {self.settings.http_max_response_bytes} bytes"
+            )
+        headers = await response.all_headers() if response is not None else {}
+        return FetchResult(
+            request_url=url,
+            final_url=page.url,
+            status_code=response.status if response is not None else 0,
+            headers={key.lower(): value for key, value in headers.items()},
+            body=body,
+            fetched_at=utc_now_naive(),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            fetch_method=FetchMethod.BROWSER,
+        )
 
     async def _walk_dimensions(
         self,

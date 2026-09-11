@@ -167,6 +167,7 @@ class PriceNature(StringEnum):
 class PriceType(StringEnum):
     DIRECT_UNCONDITIONAL = "DIRECT_UNCONDITIONAL"
     PUBLISHED_VALUE = "PUBLISHED_VALUE"
+    AVAILABILITY_ONLY = "AVAILABILITY_ONLY"
     MEMBER = "MEMBER"
     COUPON = "COUPON"
     SUBSIDY = "SUBSIDY"
@@ -200,6 +201,7 @@ class CollectionTriggerType(StringEnum):
 
 class CatalogEntityType(StringEnum):
     CATEGORY = "CATEGORY"
+    PRODUCT = "PRODUCT"
     SEARCH = "SEARCH"
     LISTING = "LISTING"
     SKU = "SKU"

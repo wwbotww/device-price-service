@@ -33,6 +33,8 @@ MySQL 5.7 解析但不执行 `CHECK`。迁移 `6f2a91d4c8b7` 会在旧版本上�
 
 V2 影子迁移 `96524222b3ec` 为 13 张 `v2_` 表补充同类约束，包括 `RETAIL_AVERAGE/WHOLESALE_AVERAGE`、来源日价格、批量证据归属和同日修订身份。完整 V1+V2 head 在 MySQL 5.7 上共有 40 个校验触发器；MySQL 8.0.16+ 使用原生 `CHECK`，不创建这些触发器。
 
+设备阶段 I 追加迁移 `b72c910e4f31`：MySQL 5.7 仅重建 `v2_crawl_record` 和 `v2_price_observation` 的 4 个校验触发器，保留原校验并增加 `PRODUCT/AVAILABILITY_ONLY`；MySQL 8.0.16+ 替换对应的 3 个 CHECK。仍为 23 张业务表、40 个 MySQL 5.7 触发器，不升级数据库版本或改变全局配置。已有新类型事实时，降级在任何 DDL 前拒绝。2026-09-11 已在本地 5.7.36/8.4 完成验证，尚未部署公司库，详见[阶段 I 报告](V2_PHASE_I_BUILD_REPORT.md)。
+
 ## 3. 字符集与时间
 
 - 字符集固定为 `utf8mb4`；
@@ -53,6 +55,8 @@ MySQL 5.7 集成测试必须使用专用 `device_price_test`，禁止把 `TEST_M
 默认 MySQL 8.4 测试继续保留，用于验证双版本兼容性。
 
 ## 5. 公司环境上线顺序
+
+以下为空库首次部署顺序。已有 `device_price` 的增量部署不得清库，应先备份并确认当前迁移版本，暂停采集写入后再升级；不能照此重复执行首次建库或测试清理。
 
 1. 确认 `device_price` 是空库；
 2. 在隔离 MySQL 5.7.36 完成完整测试；

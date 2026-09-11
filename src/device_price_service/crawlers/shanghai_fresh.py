@@ -24,8 +24,8 @@ from device_price_service.domain.catalog_crawl import (
     DiscoveredCatalogDataset,
     DiscoveredCatalogListing,
     ParsedCatalogDataset,
-    ParsedCatalogDatasetRow,
     ParsedCatalogListing,
+    ParsedCatalogRow,
     SourceMerchant,
     SourcePriceCandidate,
 )
@@ -303,7 +303,7 @@ class ShanghaiFreshRetailConnector(CatalogDatasetConnector):
             len(price_row),
         )
 
-        parsed_rows: list[ParsedCatalogDatasetRow] = []
+        parsed_rows: list[ParsedCatalogRow] = []
         for mapping in SHANGHAI_FIRST_COMMODITIES:
             matching_columns = [
                 column
@@ -372,7 +372,7 @@ def _parsed_commodity_row(
     *,
     mapping: ShanghaiCommodityMapping,
     published_price: Decimal,
-) -> ParsedCatalogDatasetRow:
+) -> ParsedCatalogRow:
     listing_key = ":".join(
         (
             "shanghai-city-retail-average",
@@ -436,7 +436,7 @@ def _parsed_commodity_row(
             )
         ],
     )
-    return ParsedCatalogDatasetRow(item=item, parsed=parsed)
+    return ParsedCatalogRow(item=item, parsed=parsed)
 
 
 def _dataset_source_date(dataset: DiscoveredCatalogDataset) -> date:

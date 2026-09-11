@@ -4,23 +4,39 @@ import json
 import re
 from urllib.parse import urljoin, urlsplit
 
-from device_price_service.crawlers.base import AdapterContext, BrandAdapter
+from device_price_service.crawlers.base import AdapterContext
+from device_price_service.crawlers.catalog import CatalogConnector
 from device_price_service.crawlers.html import HtmlNode, parse_html
-from device_price_service.domain.crawl import (
-    DiscoveredProduct,
-    FetchResult,
-    NormalizedOffer,
-    NormalizedProduct,
-    NormalizedSku,
-    ParsedProduct,
+from device_price_service.domain.catalog_crawl import (
+    CatalogCollectionRequest,
+    CatalogRegion,
+    DiscoveredCatalogListing,
+    DiscoveredCatalogProduct,
+    ParsedCatalogListing,
+    ParsedCatalogProduct,
+    ParsedCatalogRow,
+    SourceMerchant,
+    SourcePriceCandidate,
 )
-from device_price_service.domain.enums import Availability, OriginalPriceType
+from device_price_service.domain.catalog_enums import (
+    Availability,
+    CollectionFetchMethod,
+    FeeStatus,
+    OriginalPriceType,
+    PriceNature,
+    PriceType,
+    PricingBasis,
+    RegionScope,
+    SellerType,
+    VerificationStatus,
+)
+from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.price_policy import PriceCandidate, PricePolicy
-from device_price_service.normalization.specs import (
-    build_spec_fingerprint,
-    normalize_capacity,
-    normalize_text,
+from device_price_service.normalization.devices import (
+    DeviceSpecification,
+    device_listing_key,
 )
+from device_price_service.normalization.specs import normalize_text
 
 APPLE_SHOP_ORIGIN = "https://www.apple.com.cn"
 APPLE_DISCOVERY_PAGES = (
@@ -35,34 +51,64 @@ class AppleParseError(ValueError):
     """Raised when an Apple shop fixture no longer exposes required SKU fields."""
 
 
-class AppleAdapter(BrandAdapter):
+class AppleCatalogConnector(CatalogConnector):
+    product_not_found_is_definitive = True
     brand_code = "APPLE"
     channel_code = "APPLE_CN_WEB"
-    version = "apple-cn-bootstrap-v2"
+    connector_code = "apple-cn"
+    version = "apple-cn-catalog-product"
+    fetch_method = CollectionFetchMethod.HTTP
+    allowed_domains = ("www.apple.com.cn",)
+    default_category_codes = ("PHONE", "TABLET", "LAPTOP", "DESKTOP", "WATCH")
 
     def __init__(self, *, discovery_pages: tuple[tuple[str, str], ...] = APPLE_DISCOVERY_PAGES):
         self.discovery_pages = discovery_pages
         self.price_policy = PricePolicy()
 
-    async def discover(self, context: AdapterContext) -> list[DiscoveredProduct]:
-        discovered: dict[str, DiscoveredProduct] = {}
+    async def discover_products(
+        self, context: AdapterContext, request: CatalogCollectionRequest
+    ) -> list[DiscoveredCatalogProduct]:
+        if request.region_scope is not RegionScope.NATIONAL or request.region_code != "CN":
+            raise AppleParseError("Apple official prices require NATIONAL/CN scope")
+        if request.source_item_codes:
+            raise AppleParseError("Apple product discovery does not accept commodity selections")
+        categories = set(request.category_codes or self.default_category_codes)
+        if not categories.issubset(self.default_category_codes):
+            raise AppleParseError("Apple request includes an unsupported device category")
+        discovered: dict[str, DiscoveredCatalogProduct] = {}
         for category_code, page_url in self.discovery_pages:
+            page_categories = (
+                {"LAPTOP", "DESKTOP"} if category_code == "COMPUTER" else {category_code}
+            )
+            if not categories.intersection(page_categories):
+                continue
+            self._require_shop_path(page_url)
             result = await context.http.fetch(page_url, allowed_domains=context.allowed_domains)
-            if result.status_code < 200 or result.status_code >= 400:
+            self._require_same_path(page_url, result.request_url)
+            self._require_same_path(page_url, result.final_url)
+            if result.status_code < 200 or result.status_code >= 300:
                 raise AppleParseError(f"Apple discovery returned HTTP {result.status_code}")
             for item in self.parse_discovery(result.body, page_url, category_code):
-                discovered.setdefault(item.official_product_id, item)
+                if item.category_code in categories:
+                    discovered.setdefault(item.external_product_id, item)
         return list(discovered.values())
 
     async def fetch_product(
         self,
         context: AdapterContext,
-        item: DiscoveredProduct,
+        item: DiscoveredCatalogProduct,
     ) -> FetchResult:
+        self._validate_product(item)
         return await context.http.fetch(item.url, allowed_domains=context.allowed_domains)
 
-    def parse_product(self, item: DiscoveredProduct, result: FetchResult) -> ParsedProduct:
-        self._require_shop_path(result.final_url)
+    def parse_product(
+        self, item: DiscoveredCatalogProduct, result: FetchResult
+    ) -> ParsedCatalogProduct:
+        self._validate_product(item)
+        self._require_same_path(item.url, result.request_url)
+        self._require_same_path(item.url, result.final_url)
+        if not 200 <= result.status_code < 300:
+            raise AppleParseError(f"Apple product returned HTTP {result.status_code}")
         root = parse_html(result.body)
         heading = root.first(lambda node: node.tag == "h1")
         if heading is None:
@@ -74,12 +120,18 @@ class AppleAdapter(BrandAdapter):
         for anchor in root.find_all(lambda node: node.tag == "a" and bool(node.attrs.get("href"))):
             current = anchor.first(lambda node: node.has_class("current_price"))
             dimensions = self._dimensions(anchor)
-            if current is None or not dimensions:
-                continue
             href = urljoin(result.final_url, anchor.attrs["href"])
             part_number = self._part_number(href, result.final_url)
-            if part_number is None or part_number in seen_parts:
+            if current is None or not dimensions:
+                if part_number is not None and (current is not None or dimensions):
+                    raise AppleParseError(
+                        "Apple SKU is missing explicit dimensions or current price"
+                    )
                 continue
+            if part_number is None:
+                raise AppleParseError("Apple priced SKU URL is outside the discovered product")
+            if part_number in seen_parts:
+                raise AppleParseError(f"Apple product repeats SKU: {part_number}")
             seen_parts.add(part_number)
 
             original = anchor.first(
@@ -101,6 +153,7 @@ class AppleAdapter(BrandAdapter):
             skus.append(
                 {
                     "part_number": part_number,
+                    "manufacturer_part_number": part_number,
                     "source_url": href,
                     "dimensions": dimensions,
                     "current_text": normalize_text(current.text()),
@@ -114,7 +167,14 @@ class AppleAdapter(BrandAdapter):
             skus = self._selection_skus(result)
         if not skus:
             raise AppleParseError("Apple product page yielded no priced SKU")
-        return ParsedProduct(source_url=result.final_url, payload={"name": name, "skus": skus})
+        return ParsedCatalogProduct(
+            external_product_id=item.external_product_id,
+            category_code=item.category_code,
+            brand_code=self.brand_code,
+            name=name,
+            series_name=name,
+            rows=[self._catalog_row(item, name, sku) for sku in skus],
+        )
 
     @classmethod
     def _selection_skus(cls, result: FetchResult) -> list[dict[str, object]]:
@@ -143,20 +203,22 @@ class AppleAdapter(BrandAdapter):
         seen: set[str] = set()
         for product in products:
             if not isinstance(product, dict):
-                continue
+                raise AppleParseError("Apple selection contains an invalid product entry")
             sku_id = normalize_text(
                 str(product.get("btrOrFdPartNumber") or product.get("aosContainerPartNumber") or "")
             ).upper()
             price_key = normalize_text(str(product.get("priceKey", "")))
             price = prices.get(price_key)
-            if not sku_id or sku_id in seen or not isinstance(price, dict):
-                continue
+            if not sku_id or not isinstance(price, dict):
+                raise AppleParseError("Apple selection is missing a SKU identity or price")
+            if sku_id in seen:
+                raise AppleParseError(f"Apple product repeats SKU: {sku_id}")
             current = price.get("currentPrice")
             current_text = cls._bootstrap_price(current) or cls._bootstrap_price(
                 price.get("amount")
             )
             if current_text is None:
-                continue
+                raise AppleParseError("Apple selection has no explicit current SKU amount")
             seen.add(sku_id)
             dimensions = cls._bootstrap_dimensions(product, main_values)
             configuration = product.get("productConfiguration")
@@ -170,10 +232,16 @@ class AppleAdapter(BrandAdapter):
                         if str(value).strip()
                     }
                 )
+            container_part = cls._optional_string(product.get("aosContainerPartNumber"))
+            if container_part:
+                dimensions["aos_container_part_number"] = container_part
             original_text = cls._bootstrap_price(price.get("previousPrice"))
             skus.append(
                 {
                     "part_number": sku_id,
+                    "manufacturer_part_number": cls._optional_string(
+                        product.get("btrOrFdPartNumber")
+                    ),
                     "source_url": result.final_url,
                     "dimensions": dimensions,
                     "current_text": current_text,
@@ -228,114 +296,115 @@ class AppleAdapter(BrandAdapter):
     @staticmethod
     def _bootstrap_price(value: object) -> str | None:
         if isinstance(value, dict):
-            raw = value.get("raw_amount") or value.get("amount")
+            raw = value.get("raw_amount")
+            if raw is None:
+                raw = value.get("amount")
             return normalize_text(str(raw)) if raw is not None else None
         if isinstance(value, (int, float, str)) and str(value).strip():
             return normalize_text(str(value))
         return None
 
-    def normalize(self, item: DiscoveredProduct, parsed: ParsedProduct) -> NormalizedProduct:
-        category_code = item.category_code or self._category_from_url(
-            parsed.source_url,
-            item.official_product_id,
+    def _catalog_row(
+        self,
+        product: DiscoveredCatalogProduct,
+        product_name: str,
+        raw: dict[str, object],
+    ) -> ParsedCatalogRow:
+        part_number = normalize_text(str(raw["part_number"])).upper()
+        raw_dimensions = raw.get("dimensions")
+        if not isinstance(raw_dimensions, dict):
+            raise AppleParseError("Apple parsed SKU dimensions are invalid")
+        dimensions = {
+            normalize_text(str(key)).lower(): normalize_text(str(value))
+            for key, value in raw_dimensions.items()
+            if str(value).strip()
+        }
+        # Keep unrecognized, explicitly labelled configuration fields. The page
+        # heading and prices never enter the specification fingerprint.
+        known_dimensions = {
+            "capacity",
+            "storage",
+            "memory",
+            "color",
+            "connectivity",
+            "network",
+            "size",
+            "screensize",
+            "casesize",
+            "edition",
+        }
+        specification = DeviceSpecification(
+            capacity=dimensions.get("capacity") or dimensions.get("storage"),
+            memory=dimensions.get("memory"),
+            color=dimensions.get("color"),
+            connectivity=dimensions.get("connectivity") or dimensions.get("network"),
+            size=dimensions.get("size")
+            or dimensions.get("screensize")
+            or dimensions.get("casesize"),
+            edition=dimensions.get("edition"),
+            manufacturer_part_number=self._optional_string(raw.get("manufacturer_part_number")),
+            attributes={
+                key: value for key, value in dimensions.items() if key not in known_dimensions
+            },
         )
-        if category_code == "COMPUTER":
-            category_code = self._computer_category(item.official_product_id)
-        if category_code not in {"PHONE", "TABLET", "LAPTOP", "DESKTOP", "WATCH"}:
-            raise AppleParseError(f"unsupported Apple category: {category_code}")
-
-        product_name = normalize_text(str(parsed.payload["name"]))
-        normalized_skus: list[NormalizedSku] = []
-        raw_skus = parsed.payload.get("skus")
-        if not isinstance(raw_skus, list):
-            raise AppleParseError("Apple parsed SKU payload is invalid")
-        for raw in raw_skus:
-            if not isinstance(raw, dict):
-                raise AppleParseError("Apple parsed SKU entry is invalid")
-            part_number = normalize_text(str(raw["part_number"])).upper()
-            raw_dimensions = raw.get("dimensions")
-            if not isinstance(raw_dimensions, dict):
-                raise AppleParseError("Apple parsed SKU dimensions are invalid")
-            dimensions = {
-                normalize_text(str(key)).lower(): normalize_text(str(value))
-                for key, value in raw_dimensions.items()
-                if str(value).strip()
-            }
-            capacity = normalize_capacity(dimensions.get("capacity") or dimensions.get("storage"))
-            memory = normalize_capacity(dimensions.get("memory"))
-            color = dimensions.get("color")
-            connectivity = dimensions.get("connectivity") or dimensions.get("network")
-            size = (
-                dimensions.get("size") or dimensions.get("screensize") or dimensions.get("casesize")
+        original_text = self._optional_string(raw.get("original_text"))
+        resolution = self.price_policy.resolve(
+            original=PriceCandidate(
+                original_text,
+                self._optional_string(raw.get("original_label")) or "Apple 原价",
             )
-            original_text = self._optional_string(raw.get("original_text"))
-            resolution = self.price_policy.resolve(
-                original=PriceCandidate(
-                    original_text,
-                    self._optional_string(raw.get("original_label")) or "Apple 原价",
-                )
-                if original_text
-                else None,
-                current=PriceCandidate(str(raw["current_text"]), "Apple 当前售价"),
-            )
-            original_price = resolution.original_price
-            original_type = resolution.original_price_type
-            if original_price == resolution.current_price:
-                original_price = None
-                original_type = OriginalPriceType.NONE
-            attributes: dict[str, object] = {
-                "part_number": part_number,
-                **dimensions,
-            }
-            attributes["capacity"] = capacity
-            attributes["memory"] = memory
-            display_dimensions = (
-                value for key, value in dimensions.items() if not key.startswith("configuration_")
-            )
-            sku_name = " ".join(
-                part
-                for part in (
-                    product_name,
-                    *dict.fromkeys(display_dimensions),
-                    part_number,
-                )
-                if part
-            )
-            normalized_skus.append(
-                NormalizedSku(
-                    official_sku_id=part_number,
-                    name=sku_name,
-                    color=color,
-                    capacity=capacity,
-                    memory=memory,
-                    connectivity=connectivity,
-                    size=size,
-                    attributes=attributes,
-                    spec_fingerprint=build_spec_fingerprint(attributes),
-                    status="ACTIVE",
-                    offers=[
-                        NormalizedOffer(
-                            official_offer_id=part_number,
-                            source_url=str(raw["source_url"]),
-                            original_price=original_price,
-                            original_price_type=original_type,
-                            current_price=resolution.current_price,
-                            availability=Availability(str(raw["availability"])),
-                        )
-                    ],
-                )
-            )
-
-        return NormalizedProduct(
-            brand_code=self.brand_code,
-            channel_code=self.channel_code,
-            category_code=category_code,
-            official_product_id=item.official_product_id,
-            name=product_name,
-            series_name=product_name,
-            official_url=parsed.source_url,
-            lifecycle_status="ACTIVE",
-            skus=normalized_skus,
+            if original_text
+            else None,
+            current=PriceCandidate(str(raw["current_text"]), "Apple 当前售价"),
+        )
+        original_price = resolution.original_price
+        original_type = resolution.original_price_type
+        if original_price == resolution.current_price:
+            original_price = None
+            original_type = OriginalPriceType.NONE
+        display_dimensions = (
+            value for key, value in dimensions.items() if not key.startswith("configuration_")
+        )
+        sku_name = " ".join(
+            part for part in (product_name, *dict.fromkeys(display_dimensions), part_number) if part
+        )
+        return ParsedCatalogRow(
+            item=DiscoveredCatalogListing(
+                listing_key=device_listing_key(
+                    product_id=product.external_product_id,
+                    sku_id=part_number,
+                    specification=specification,
+                ),
+                url=str(raw["source_url"]),
+                category_code=product.category_code,
+                merchant=SourceMerchant(
+                    merchant_key=self.channel_code,
+                    name="Apple 中国大陆官方在线商店",
+                    seller_type=SellerType.BRAND_OFFICIAL,
+                    verification_status=VerificationStatus.VERIFIED,
+                ),
+                price_nature=PriceNature.RETAIL_OFFER,
+                external_product_id=product.external_product_id,
+                external_sku_id=part_number,
+            ),
+            parsed=ParsedCatalogListing(
+                source_title=sku_name,
+                source_category_path=product.category_code,
+                source_attributes={"device_specification": specification.identity_attributes()},
+                price_candidates=[
+                    SourcePriceCandidate(
+                        current_price=resolution.current_price,
+                        original_price=original_price,
+                        original_price_type=original_type,
+                        price_type=PriceType.DIRECT_UNCONDITIONAL,
+                        pricing_basis=PricingBasis.PACKAGE_TOTAL,
+                        availability=Availability(str(raw["availability"])),
+                        fee_status=FeeStatus.ITEM_ONLY,
+                        displayed_price_text=str(raw["current_text"]),
+                        region=CatalogRegion(scope=RegionScope.NATIONAL, code="CN"),
+                    )
+                ],
+            ),
         )
 
     @classmethod
@@ -344,14 +413,15 @@ class AppleAdapter(BrandAdapter):
         body: bytes,
         page_url: str,
         category_code: str,
-    ) -> list[DiscoveredProduct]:
+    ) -> list[DiscoveredCatalogProduct]:
+        cls._require_shop_path(page_url)
         root = parse_html(body)
         page_path = urlsplit(page_url).path.rstrip("/")
-        items: dict[str, DiscoveredProduct] = {}
+        items: dict[str, DiscoveredCatalogProduct] = {}
         for anchor in root.find_all(lambda node: node.tag == "a" and bool(node.attrs.get("href"))):
             href = urljoin(page_url, anchor.attrs["href"])
             parsed = urlsplit(href)
-            if parsed.scheme != "https" or parsed.hostname != "www.apple.com.cn":
+            if not cls._approved_url(href):
                 continue
             candidate_path = parsed.path.rstrip("/")
             if not candidate_path.startswith(f"{page_path}/"):
@@ -368,8 +438,8 @@ class AppleAdapter(BrandAdapter):
             product_id = suffix.lower()
             items.setdefault(
                 product_id,
-                DiscoveredProduct(
-                    official_product_id=product_id,
+                DiscoveredCatalogProduct(
+                    external_product_id=product_id,
                     url=f"{APPLE_SHOP_ORIGIN}{candidate_path}",
                     category_code=product_category,
                 ),
@@ -398,12 +468,12 @@ class AppleAdapter(BrandAdapter):
             return cls._computer_category(product_id)
         return ""
 
-    @staticmethod
-    def _part_number(href: str, product_url: str) -> str | None:
+    @classmethod
+    def _part_number(cls, href: str, product_url: str) -> str | None:
         parsed = urlsplit(href)
         product_path = urlsplit(product_url).path.rstrip("/").lower()
         path = parsed.path.rstrip("/")
-        if parsed.scheme != "https" or parsed.hostname != "www.apple.com.cn":
+        if not cls._approved_url(href):
             return None
         if not path.lower().startswith(f"{product_path}/"):
             return None
@@ -440,14 +510,44 @@ class AppleAdapter(BrandAdapter):
         return "Apple 原价"
 
     @staticmethod
-    def _require_shop_path(url: str) -> None:
+    def _approved_url(url: str) -> bool:
         parsed = urlsplit(url)
-        if (
-            parsed.scheme != "https"
-            or parsed.hostname != "www.apple.com.cn"
-            or not parsed.path.startswith("/shop/buy-")
+        try:
+            port = parsed.port
+        except ValueError:
+            return False
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "www.apple.com.cn"
+            and port in {None, 443}
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+        )
+
+    @classmethod
+    def _require_shop_path(cls, url: str) -> None:
+        parsed = urlsplit(url)
+        if not cls._approved_url(url) or not re.fullmatch(
+            r"/shop/buy-(?:iphone|ipad|mac|watch)(?:/[A-Za-z0-9-]+)?/?", parsed.path
         ):
             raise AppleParseError(f"Apple URL is outside approved shop paths: {url}")
+
+    @classmethod
+    def _require_same_path(cls, expected: str, actual: str) -> None:
+        cls._require_shop_path(actual)
+        if urlsplit(expected).path.rstrip("/") != urlsplit(actual).path.rstrip("/"):
+            raise AppleParseError("Apple response URL does not match the discovered product path")
+
+    @classmethod
+    def _validate_product(cls, item: DiscoveredCatalogProduct) -> None:
+        cls._require_shop_path(item.url)
+        path = urlsplit(item.url).path.rstrip("/")
+        if path.rsplit("/", 1)[-1] != item.external_product_id:
+            raise AppleParseError("Apple product ID does not match its official URL")
+        category = cls._category_from_url(item.url, item.external_product_id)
+        if item.category_code not in cls.default_category_codes or item.category_code != category:
+            raise AppleParseError("Apple product category does not match its official URL")
 
     @staticmethod
     def _optional_string(value: object) -> str | None:

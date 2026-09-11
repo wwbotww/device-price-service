@@ -1,36 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from device_price_service.crawlers.device_sources import BRANDS, CHANNELS
 from device_price_service.db.models import Brand, Category, SalesChannel
-
-
-@dataclass(frozen=True)
-class BrandSeed:
-    code: str
-    name_zh: str
-    name_en: str
-
-
-@dataclass(frozen=True)
-class ChannelSeed:
-    brand_code: str
-    code: str
-    name: str
-    base_url: str
-    allowed_domains: list[str]
-
-
-BRANDS = (
-    BrandSeed("APPLE", "Apple", "Apple"),
-    BrandSeed("HUAWEI", "华为", "Huawei"),
-    BrandSeed("XIAOMI", "小米", "Xiaomi"),
-    BrandSeed("OPPO", "OPPO", "OPPO"),
-    BrandSeed("VIVO", "vivo", "vivo"),
-)
 
 CATEGORIES = (
     ("PHONE", "手机", None),
@@ -40,45 +14,6 @@ CATEGORIES = (
     ("DESKTOP", "台式电脑", "COMPUTER"),
     ("WATCH", "手表", None),
 )
-
-CHANNELS = (
-    ChannelSeed(
-        "APPLE",
-        "APPLE_CN_WEB",
-        "Apple 中国大陆在线商店",
-        "https://www.apple.com.cn/shop/",
-        ["www.apple.com.cn"],
-    ),
-    ChannelSeed(
-        "HUAWEI",
-        "HUAWEI_CN_WEB",
-        "华为商城",
-        "https://www.vmall.com/",
-        ["www.vmall.com", "m.vmall.com", "item.vmall.com", "openapi.vmall.com"],
-    ),
-    ChannelSeed(
-        "XIAOMI",
-        "XIAOMI_CN_WEB",
-        "小米商城",
-        "https://www.mi.com/shop/",
-        ["www.mi.com"],
-    ),
-    ChannelSeed(
-        "OPPO",
-        "OPPO_CN_WEB",
-        "OPPO 商城",
-        "https://www.opposhop.cn/",
-        ["www.opposhop.cn"],
-    ),
-    ChannelSeed(
-        "VIVO",
-        "VIVO_CN_WEB",
-        "vivo 官方商城",
-        "https://shop.vivo.com.cn/",
-        ["shop.vivo.com.cn"],
-    ),
-)
-
 
 def seed_reference_data(session: Session) -> None:
     brands_by_code: dict[str, Brand] = {}
@@ -123,14 +58,14 @@ def seed_reference_data(session: Session) -> None:
                 code=channel_seed.code,
                 name=channel_seed.name,
                 base_url=channel_seed.base_url,
-                allowed_domains=channel_seed.allowed_domains,
+                allowed_domains=list(channel_seed.allowed_domains),
             )
             session.add(channel)
         else:
             channel.brand_id = brands_by_code[channel_seed.brand_code].id
             channel.name = channel_seed.name
             channel.base_url = channel_seed.base_url
-            channel.allowed_domains = channel_seed.allowed_domains
+            channel.allowed_domains = list(channel_seed.allowed_domains)
             channel.region_code = "CN"
             channel.currency = "CNY"
             channel.seller_type = "OFFICIAL_DIRECT"

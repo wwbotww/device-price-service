@@ -5,8 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from device_price_service.crawlers.oppo import OPPO_SNAPSHOT_PLAN, OppoAdapter
-from device_price_service.domain.crawl import DiscoveredProduct, FetchResult
+from device_price_service.crawlers.oppo import OPPO_SNAPSHOT_PLAN, OppoCatalogConnector
+from device_price_service.domain.catalog_crawl import DiscoveredCatalogProduct
+from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.enums import FetchMethod, OriginalPriceType
 from device_price_service.domain.price_policy import ConditionalPriceError
 
@@ -28,11 +29,11 @@ def _result(filename: str) -> FetchResult:
 
 
 def test_oppo_discovers_core_devices_and_excludes_oneplus_services_and_external_links() -> None:
-    items = OppoAdapter.parse_discovery(
+    items = OppoCatalogConnector.parse_discovery(
         (FIXTURES / "discovery.html").read_bytes(), "https://www.opposhop.cn/"
     )
 
-    assert [(item.official_product_id, item.category_code) for item in items] == [
+    assert [(item.external_product_id, item.category_code) for item in items] == [
         ("43001", "PHONE"),
         ("43002", "TABLET"),
         ("43003", "WATCH"),
@@ -58,16 +59,16 @@ def test_oppo_discovers_current_oapi_products() -> None:
         }
     ).encode()
 
-    items = OppoAdapter.parse_discovery(body, "https://www.opposhop.cn/")
+    items = OppoCatalogConnector.parse_discovery(body, "https://www.opposhop.cn/")
 
-    assert [(item.official_product_id, item.category_code) for item in items] == [
+    assert [(item.external_product_id, item.category_code) for item in items] == [
         ("25642", "PHONE")
     ]
     assert "skuId=40697" in items[0].url
 
 
 def test_oppo_parses_current_oapi_detail_batch() -> None:
-    url = OppoAdapter._detail_url("40697")
+    url = OppoCatalogConnector._detail_url("40697")
     body = json.dumps(
         {
             "schema": "oppo-oapi-detail-batch-v2",
@@ -98,25 +99,26 @@ def test_oppo_parses_current_oapi_detail_batch() -> None:
         duration_ms=5,
         fetch_method=FetchMethod.REPLAY,
     )
-    item = DiscoveredProduct(
-        official_product_id="25642",
+    item = DiscoveredCatalogProduct(
+        external_product_id="25642",
         url=url,
         category_code="PHONE",
     )
-    adapter = OppoAdapter()
+    adapter = OppoCatalogConnector()
 
-    product = adapter.normalize(item, adapter.parse_product(item, result))
+    product = adapter.parse_product(item, result)
 
     assert product.name == "OPPO Reno16 Pro"
-    assert product.skus[0].official_sku_id == "40697"
-    assert product.skus[0].memory == "16GB"
-    assert product.skus[0].capacity == "512GB"
-    assert product.skus[0].offers[0].current_price == Decimal("5299.00")
-    assert product.skus[0].offers[0].original_price == Decimal("5599.00")
+    row = product.rows[0]
+    assert row.item.external_sku_id == "40697"
+    assert row.parsed.source_attributes["device_specification"]["memory"] == "16GB"
+    assert row.parsed.source_attributes["device_specification"]["capacity"] == "512GB"
+    assert row.parsed.price_candidates[0].current_price == Decimal("5299.00")
+    assert row.parsed.price_candidates[0].original_price == Decimal("5599.00")
 
 
 def test_oppo_uses_discovery_name_when_variant_seo_titles_differ() -> None:
-    url = OppoAdapter._detail_url("40697")
+    url = OppoCatalogConnector._detail_url("40697")
     body = json.dumps(
         {
             "schema": "oppo-oapi-detail-batch-v2",
@@ -125,12 +127,14 @@ def test_oppo_uses_discovery_name_when_variant_seo_titles_differ() -> None:
                     "skuId": 40697,
                     "spuId": 25642,
                     "seoTitle": "OPPO Reno16 Pro 标准版",
+                    "config": "标准版 12GB+256GB",
                     "price": "5299",
                 },
                 {
                     "skuId": 40698,
                     "spuId": 25642,
                     "seoTitle": "OPPO Reno16 Pro 柔光版",
+                    "config": "柔光版 12GB+256GB",
                     "price": "5499",
                 },
             ],
@@ -147,39 +151,44 @@ def test_oppo_uses_discovery_name_when_variant_seo_titles_differ() -> None:
         duration_ms=5,
         fetch_method=FetchMethod.REPLAY,
     )
-    item = DiscoveredProduct(
-        official_product_id="25642",
+    item = DiscoveredCatalogProduct(
+        external_product_id="25642",
         url=url,
         category_code="PHONE",
         metadata={"discovered_name": "OPPO Reno16 Pro"},
     )
-    adapter = OppoAdapter()
+    adapter = OppoCatalogConnector()
 
-    product = adapter.normalize(item, adapter.parse_product(item, result))
+    product = adapter.parse_product(item, result)
 
     assert product.name == "OPPO Reno16 Pro"
-    assert [sku.official_sku_id for sku in product.skus] == ["40697", "40698"]
+    assert [row.item.external_sku_id for row in product.rows] == ["40697", "40698"]
+    assert product.rows[0].parsed.source_attributes != product.rows[1].parsed.source_attributes
 
 
 def test_oppo_normalizes_direct_sku_prices() -> None:
-    adapter = OppoAdapter()
-    item = DiscoveredProduct(official_product_id="43001", url=PRODUCT_URL, category_code="PHONE")
-    product = adapter.normalize(
-        item, adapter.parse_product(item, _result("product_snapshots.json"))
+    adapter = OppoCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="43001", url=PRODUCT_URL, category_code="PHONE"
     )
+    product = adapter.parse_product(item, _result("product_snapshots.json"))
 
-    assert len(product.skus) == 2
-    assert product.skus[0].memory == "12GB"
-    assert product.skus[0].capacity == "256GB"
-    assert product.skus[0].offers[0].current_price == Decimal("5999.00")
-    assert product.skus[1].offers[0].original_price == Decimal("6999.00")
-    assert product.skus[1].offers[0].original_price_type is OriginalPriceType.CROSSED_OUT
+    assert len(product.rows) == 2
+    assert product.rows[0].parsed.source_attributes["device_specification"]["memory"] == "12GB"
+    assert product.rows[0].parsed.source_attributes["device_specification"]["capacity"] == "256GB"
+    assert product.rows[0].parsed.price_candidates[0].current_price == Decimal("5999.00")
+    assert product.rows[1].parsed.price_candidates[0].original_price == Decimal("6999.00")
+    assert (
+        product.rows[1].parsed.price_candidates[0].original_price_type
+        is OriginalPriceType.CROSSED_OUT
+    )
 
 
 def test_oppo_rejects_coupon_selected_price() -> None:
-    adapter = OppoAdapter()
-    item = DiscoveredProduct(official_product_id="43001", url=PRODUCT_URL, category_code="PHONE")
-    parsed = adapter.parse_product(item, _result("product_conditional_price.json"))
+    adapter = OppoCatalogConnector()
+    item = DiscoveredCatalogProduct(
+        external_product_id="43001", url=PRODUCT_URL, category_code="PHONE"
+    )
 
     with pytest.raises(ConditionalPriceError, match="conditional price"):
-        adapter.normalize(item, parsed)
+        adapter.parse_product(item, _result("product_conditional_price.json"))

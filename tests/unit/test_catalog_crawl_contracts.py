@@ -4,6 +4,9 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
+from device_price_service.crawlers.apple import AppleCatalogConnector
+from device_price_service.crawlers.catalog import CatalogConnectorRegistry
+from device_price_service.crawlers.shanghai_fresh import ShanghaiFreshRetailConnector
 from device_price_service.domain.catalog_crawl import (
     CatalogCollectionRequest,
     CatalogRegion,
@@ -232,3 +235,28 @@ def test_discovery_identity_includes_merchant_listing_and_price_nature() -> None
         "product-1:sku-5kg:retail",
         "RETAIL_OFFER",
     )
+
+
+def test_one_connector_registry_contains_products_and_public_datasets() -> None:
+    registry = CatalogConnectorRegistry()
+    apple = AppleCatalogConnector()
+    government = ShanghaiFreshRetailConnector()
+    registry.register(apple)
+    registry.register(government)
+
+    assert registry.get(" apple_cn_web ") is apple
+    assert registry.get(government.channel_code) is government
+    assert list(registry) == [apple, government]
+    with pytest.raises(ValueError, match="already registered"):
+        registry.register(AppleCatalogConnector())
+    with pytest.raises(ValueError, match="not registered"):
+        registry.get("UNREGISTERED")
+
+
+@pytest.mark.parametrize("field", ["connector_code", "version", "allowed_domains"])
+def test_connector_registry_rejects_incomplete_runtime_contracts(field: str) -> None:
+    connector = AppleCatalogConnector()
+    setattr(connector, field, () if field == "allowed_domains" else " ")
+
+    with pytest.raises(ValueError, match="cannot be (blank|empty)"):
+        CatalogConnectorRegistry().register(connector)
