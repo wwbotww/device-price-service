@@ -63,6 +63,7 @@ class PricePolicy:
         re.IGNORECASE,
     )
     _PLAIN_NUMBER = re.compile(r"^[0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?$")
+    _STARTING_AMOUNT = re.compile(r"[0-9](?:\s*元)?\s*起")
 
     def resolve(
         self,
@@ -89,7 +90,10 @@ class PricePolicy:
         allow_conditional: bool = False,
     ) -> Decimal:
         combined = f"{candidate.label} {candidate.text}".strip()
-        if not allow_conditional and any(term in combined for term in self._CONDITIONAL_TERMS):
+        if not allow_conditional and (
+            any(term in combined for term in self._CONDITIONAL_TERMS)
+            or self._STARTING_AMOUNT.search(combined)
+        ):
             raise ConditionalPriceError(f"conditional price is excluded: {combined}")
 
         raw_amounts = [first or second for first, second in self._MONEY_PATTERN.findall(combined)]

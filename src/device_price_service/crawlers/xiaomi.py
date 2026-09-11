@@ -42,7 +42,7 @@ from device_price_service.normalization.specs import (
     normalize_text,
 )
 
-XIAOMI_SHOP_URL = "https://www.mi.com/shop/"
+XIAOMI_SHOP_URL = "https://www.mi.com/shop"
 XIAOMI_SNAPSHOT_PLAN = BrowserSnapshotPlan(
     ready_selector=".product-con .price-info",
     snapshot_selector=".product-con",

@@ -54,7 +54,7 @@ CHANNELS = (
         "XIAOMI",
         "XIAOMI_CN_WEB",
         "小米商城",
-        "https://www.mi.com/shop/",
+        "https://www.mi.com/shop",
         ("www.mi.com",),
         "xiaomi-cn",
         AccessMode.MIXED,

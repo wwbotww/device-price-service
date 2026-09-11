@@ -1,12 +1,25 @@
+import asyncio
 import json
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
-from device_price_service.crawlers.xiaomi import XIAOMI_SNAPSHOT_PLAN, XiaomiCatalogConnector
-from device_price_service.domain.catalog_crawl import DiscoveredCatalogProduct
+from device_price_service.crawlers.base import AdapterContext
+from device_price_service.crawlers.xiaomi import (
+    XIAOMI_SHOP_URL,
+    XIAOMI_SNAPSHOT_PLAN,
+    XiaomiCatalogConnector,
+    XiaomiParseError,
+)
+from device_price_service.domain.catalog_crawl import (
+    CatalogCollectionRequest,
+    DiscoveredCatalogProduct,
+)
+from device_price_service.domain.catalog_enums import RegionScope
 from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.enums import Availability, FetchMethod, OriginalPriceType
 from device_price_service.domain.price_policy import ConditionalPriceError
@@ -34,7 +47,7 @@ def _result(filename: str) -> FetchResult:
 def test_xiaomi_discovers_only_core_xiaomi_devices() -> None:
     items = XiaomiCatalogConnector.parse_discovery(
         (FIXTURES / "discovery.html").read_bytes(),
-        "https://www.mi.com/shop/",
+        XIAOMI_SHOP_URL,
     )
 
     assert [(item.external_product_id, item.category_code) for item in items] == [
@@ -43,6 +56,54 @@ def test_xiaomi_discovers_only_core_xiaomi_devices() -> None:
         ("91003", "LAPTOP"),
         ("91004", "WATCH"),
     ]
+
+
+def _discovery_result() -> FetchResult:
+    return FetchResult(
+        request_url="https://www.mi.com/shop",
+        final_url="https://www.mi.com/shop",
+        status_code=200,
+        headers={"content-type": "text/html"},
+        body=(FIXTURES / "discovery.html").read_bytes(),
+        fetched_at=datetime(2026, 9, 11, 5),
+        duration_ms=20,
+        fetch_method=FetchMethod.HTTP,
+    )
+
+
+def test_xiaomi_discovery_requests_canonical_shop_without_redirect() -> None:
+    connector = XiaomiCatalogConnector()
+    http = AsyncMock()
+    http.fetch.return_value = _discovery_result()
+    context = AdapterContext(http=http, browser=AsyncMock(), allowed_domains=["www.mi.com"])
+
+    products = asyncio.run(
+        connector.discover_products(
+            context,
+            CatalogCollectionRequest(region_scope=RegionScope.NATIONAL, region_code="CN"),
+        )
+    )
+
+    assert connector.discovery_url == "https://www.mi.com/shop"
+    http.fetch.assert_awaited_once_with("https://www.mi.com/shop", allowed_domains=["www.mi.com"])
+    assert len(products) == 4
+
+
+@pytest.mark.parametrize("field", ["request_url", "final_url"])
+@pytest.mark.parametrize("changed_url", ["https://www.mi.com/shop/", "https://example.com/shop"])
+def test_xiaomi_discovery_still_rejects_changed_response_url(field: str, changed_url: str) -> None:
+    connector = XiaomiCatalogConnector()
+    http = AsyncMock()
+    http.fetch.return_value = replace(_discovery_result(), **{field: changed_url})
+    context = AdapterContext(http=http, browser=AsyncMock(), allowed_domains=["www.mi.com"])
+
+    with pytest.raises(XiaomiParseError, match="changed its requested URL"):
+        asyncio.run(
+            connector.discover_products(
+                context,
+                CatalogCollectionRequest(region_scope=RegionScope.NATIONAL, region_code="CN"),
+            )
+        )
 
 
 def test_xiaomi_snapshot_plan_enumerates_only_device_specs_and_colors() -> None:

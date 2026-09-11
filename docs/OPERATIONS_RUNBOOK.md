@@ -1,10 +1,10 @@
 # 运行与故障处理手册
 
-> 适用版本：V2 政府生鲜 + 五品牌原生设备；I～L 已完成，M 真实验收待实施
+> 适用版本：V2 政府生鲜 + 五品牌原生设备；I～L 已完成，M 未通过最终验收，待 6 组 iMac 身份限定修复授权
 > 数据库：MySQL 5.7.36 或 MySQL 8.x
 > 原则：生产凭据不落盘；集成测试永远不指向公司库；真实采集必须通过门禁
 
-公司 `device_price` 已部署的是 V2 政府生鲜：商务部 15 个跨地区批发品种为主来源，上海 8 个零售均价为补充。设备 I～L 改造尚未部署公司库。默认手工 smoke 和单次采集，设备调度仅作为显式可选入口，政府不自动调度。2026-08-25 的重建、备份、数据量和质量核对见 [阶段 H 公司库验收报告](V2_PHASE_H_COMPANY_ACCEPTANCE_REPORT.md)。
+公司 `device_price` 保存 V2 政府生鲜：商务部 15 个跨地区批发品种为主来源，上海 8 个零售均价为补充。2026-09-11 已完成设备约束增量迁移和五品牌 V2 复采；严格重放发现 6 组历史 iMac 重复身份，待限定数据修复授权，尚未通过最终验收。所有来源采集已停止，无后台任务。默认手工运行，设备调度仅为显式可选入口，政府不自动调度。历史重建见[阶段 H 报告](V2_PHASE_H_COMPANY_ACCEPTANCE_REPORT.md)，当前状态见[阶段 M 记录](V2_PHASE_M_ACCEPTANCE_REPORT.md)。
 
 ## 1. 首次部署
 
@@ -67,7 +67,9 @@ LIVE_CRAWL_ENABLED=true \
 
 上海 `catalog crawl` 每批发现目录和文章各一次、下载 XLS 一次；8 条价格共享一个 `v2_crawl_record`。商务部每个品种页独立发现和下载，页面内所有市场价格共享一个 `v2_crawl_record`；省略 `--commodity` 或使用 `ALL` 会按白名单顺序执行 15 个独立批次。关闭对应 `v2_source_channel.enabled` 即可阻止后续写入。政府来源不注册 scheduler。
 
-### 2.2 当前公司库状态（2026-09-10）
+### 2.2 公司库状态
+
+2026-09-10 历史基线：
 
 - Alembic head：`96524222b3ec`；23 张业务表；MySQL 5.7 下 40 个校验触发器；
 - V1 已恢复五品牌设备 demo：103 个产品、1,114 条 SKU 当前价及历史；政府数据仍只写 13 张 `v2_` 表，电子设备尚未接入 V2；
@@ -78,6 +80,12 @@ LIVE_CRAWL_ENABLED=true \
 需要更新时先运行只读 smoke，再按上面的 `catalog crawl` 命令手工采集。相同来源日和相同行证据会幂等复用，不能用手工 SQL 直接改 `v2_price_current`。
 
 设备恢复结果、批次数量、原价和库存状态限制见[V1 重采验收记录](V1_RECOLLECTION_20260910_REPORT.md)。
+
+2026-09-11 阶段 M 已完成获准备份、本地专用 MySQL 5.7 恢复校验及迁移演练，公司库已从 `96524222b3ec` 增量升级至 `b72c910e4f31`；仍为 MySQL 5.7.36-log、23 张业务表和 40 个触发器。迁移仅更换 4 个 V2 校验触发器和 Alembic 版本，既有业务行、表 DDL、其余触发器与其他 schema 结构元数据未变。
+
+修复后的五品牌复采已完成：华为批次 23（49 产品 / 460 条接受观察）、小米 24（17 / 138）、OPPO 26（12 / 110）、vivo 27（10 / 115）均为 `SUCCEEDED`；Apple 批次 25 发现 19 产品、成功解析 16 产品、接受 306 条观察，实际错误汇总为 `APPLEPARSEERROR=3`（三个 Watch 组合页）和 `SKU_COVERAGE_INCOMPLETE=1`（iMac），批次为 `PARTIAL`。这些数字是批次计数，不是当前库总量或全站覆盖承诺。
+
+最终数据库审计全部 critical 为 0，165 份证据引用检查通过，V1/政府全部既有行及其他 schema 的 11 类结构元数据未变；但严格重放记录 49 暴露 6 组 iMac 重复来源身份。不同来源 ID 对应同一真实规格，不能直接改键以规避唯一约束，也不能未经授权合并或删除已入库事实。当前等待仅合并这 6 组身份、保留全部价格时点与证据的限定授权，所有采集已停止；完整结果与拟修复边界见[阶段 M 记录](V2_PHASE_M_ACCEPTANCE_REPORT.md)。
 
 ### 2.3 单独恢复或更新 V1 设备 demo
 
@@ -101,7 +109,7 @@ ORDER BY b.code, p.id, s.id;
 
 ### 2.4 设备 V2 基础初始化（阶段 I～L，本地验证）
 
-代码 head 已追加为 `b72c910e4f31`，公司库状态仍以上文 2026-09-10 的记录为准，本轮没有连接或迁移公司库。此迁移只更新 V2 产品证据和无价状态约束，不新增/删除业务表，也不从 V1 复制价格。先将 `MYSQL_*` 指向本地专用开发库，检查连接目标后执行：
+代码与公司库 head 均为 `b72c910e4f31`：阶段 I～L 完成本地验证，阶段 M 已完成公司增量迁移。此迁移只更新 V2 产品证据和无价状态约束，不新增/删除业务表，也不从 V1 复制价格。以下用于本地开发初始化；先将 `MYSQL_*` 指向本地专用开发库，检查连接目标后执行：
 
 ```bash
 uv run alembic upgrade head
@@ -124,11 +132,11 @@ RUN_MYSQL_INTEGRATION=1 TEST_MYSQL_HOST=127.0.0.1 \
   TEST_MYSQL_PORT=3308 TEST_MYSQL_DATABASE=device_price_test make test-integration
 ```
 
-这些命令会清空专用测试库，禁止改为公司目标。含 `PRODUCT` 或 `AVAILABILITY_ONLY` 事实时，新迁移会在执行 DDL 前拒绝降级；不得删除证据来强行回退。公司部署需另行备份、确认目标、暂停写入后再进行增量升级；MySQL DDL 不具备事务回滚，不应在采集并发写入时替换约束。验证结果与待办见[阶段 I 报告](V2_PHASE_I_BUILD_REPORT.md)及[阶段 J 报告](V2_PHASE_J_BUILD_REPORT.md)。
+这些命令会清空专用测试库，禁止改为公司目标。含 `PRODUCT` 或 `AVAILABILITY_ONLY` 事实时，新迁移会在执行 DDL 前拒绝降级；不得删除证据来强行回退。后续公司部署仍需备份、确认目标并暂停写入；MySQL DDL 不具备事务回滚，不应在采集并发写入时替换约束。重建触发器前记录其 SQL_MODE、definer、字符集和排序规则，迁移连接应保持已有触发器的会话属性，并在迁移后逐项核验；不得用 `SET GLOBAL` 调整实例环境。本轮部署核验见[阶段 M 记录](V2_PHASE_M_ACCEPTANCE_REPORT.md)。
 
 ### 2.5 五品牌原生 V2 入口（阶段 J～K）
 
-阶段 I～L 仅用脱敏 fixture 和本地 MySQL 验收，尚未运行本轮真实商城采集。价格突变复核、缺失和批次保护、完整只读重放/audit 均已接入，暂不部署公司库。之后进行获准真实验证时，先确认目标库与开关，再执行（渠道可替换为 `HUAWEI_CN_WEB/XIAOMI_CN_WEB/OPPO_CN_WEB/VIVO_CN_WEB`）：
+阶段 I～L 已完成脱敏 fixture 和本地 MySQL 验收；阶段 M 已完成公司增量迁移和五品牌复采，但因历史 iMac 重复身份尚未通过最终验收，当前无后台采集。以下是通用运行入口，不是当前待授权的数据修复命令。获准真实运行时，先确认目标库与开关，再执行（渠道可替换为 `HUAWEI_CN_WEB/XIAOMI_CN_WEB/OPPO_CN_WEB/VIVO_CN_WEB`）：
 
 ```bash
 # 不连接数据库：发现产品，抽样完整解析 SKU，并执行静态质量校验
@@ -139,6 +147,8 @@ LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel APPLE_CN_WEB
 ```
 
 正式采集每个产品一个事务，所有 SKU 共用一组 `PRODUCT` 证据，直接建立 `v2_catalog_item/item_variant/listing_match` 及价格事实。仅失败的产品回滚，其他成功产品保留；失败证据仍保存。重放旧时点不恢复生命周期或更新当前 URL，未知 SKU 状态不等于有货，Apple Watch 总价缺口仍按严格规则拒绝。
+
+设备单产品写事务单独使用 `READ COMMITTED`，连接归还后恢复默认隔离级别；政府事务与实例全局配置不变。运行前只读确认 `binlog_format` 为 `ROW/MIXED`，若为 `STATEMENT` 则停止设备写入并确认环境方案，不得擅自 `SET GLOBAL`。公司本轮已确认全局/检查会话为 `ROW` 和 `REPEATABLE-READ`。来源/地区命名锁、父 revision 锁及匹配约束继续生效，具体并发修复见[兼容说明](MYSQL_57_COMPATIBILITY.md#22-设备并发写入的事务隔离)。
 
 命令输出包含 `status`：`SUCCEEDED` 才退出 0，`PARTIAL/FAILED` 退出 1，参数、真实开关或数据库来源配置门禁不通过退出 2。除来源日期外应检查 `accepted_count/review_count/rejected_count/failed_count`；不能只看失败请求数或新增行数。V2 重放使用第 2.6 节的 `catalog replay`，不再提供旧顶层 `replay`。
 
@@ -233,6 +243,8 @@ mysqldump \
 
 使用 `--password` 让客户端交互读取密码，不在参数中暴露。备份完成后记录文件大小和 SHA-256，并按公司策略加密和轮换。
 
+逻辑备份只包含 `raw_path` 和 `artifact_manifest` 等证据引用，不包含文件正文。必须从实际 `RAW_STORAGE_PATH` 同步备份 `raw_path` 及 manifest 中额外的文件引用，保留相对路径并校验哈希；不能只复制每条记录的主文件，也不能把只有哈希、没有路径的历史上下文当作已归档文件。导出前明确数据范围和存储目录，不将备份提交到 Git。
+
 ## 6. 恢复演练
 
 恢复演练只能使用专用临时实例或明确授权的恢复测试库，禁止覆盖生产 `device_price`：
@@ -243,6 +255,8 @@ mysqldump \
 4. 核对 Alembic 版本、13 张 V2 必需表（完整历史迁移共 23 张业务表）、种子数量、触发器数量和关键表行数；
 5. 使用 fixture 执行一次写入和重放；
 6. 删除临时实例，保存演练时间、恢复耗时、校验结果和备份哈希。
+
+恢复核验不能只比较行数，还应核对数据、DDL、触发器定义与属性，并用备份的证据目录检查文件。MySQL 5.7 `mysqldump` 可能在导出的触发器 SQL_MODE 中去掉 `NO_AUTO_CREATE_USER`；本轮原样恢复已记录这一差异，不把它算作生产迁移的允许变更，正式迁移仍保留原触发器属性。具体备份、恢复校验和迁移演练结果见[阶段 M 记录](V2_PHASE_M_ACCEPTANCE_REPORT.md)。
 
 至少每季度演练一次，迁移或备份方式变更后额外演练一次。
 

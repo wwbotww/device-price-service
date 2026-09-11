@@ -1,5 +1,6 @@
 import asyncio
 import json
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
@@ -68,7 +69,11 @@ def _bootstrap() -> dict:
                     "chassis-dimensionScreensize": "13inch",
                     "chassis-dimensionColor": "midnight",
                 },
-                "productConfiguration": {"memory": "MEM16", "storage": "SSD512"},
+                "productConfiguration": {
+                    "processor": "CHIP_FIXTURE",
+                    "memory": "MEM16",
+                    "storage": "SSD512",
+                },
             }
         ],
         "mainDisplayValues": {
@@ -201,7 +206,9 @@ def test_apple_parses_exact_preselected_configuration_from_bootstrap() -> None:
     specification = DeviceSpecification.model_validate(
         row.parsed.source_attributes["device_specification"]
     )
-    assert row.item.external_sku_id == "RO_MBA_FIXTURE"
+    assert row.item.external_sku_id is None
+    assert json.loads(row.item.listing_key)[1] == "spec"
+    assert "None" not in row.parsed.source_title
     assert specification.size == "13 英寸"
     assert specification.color == "午夜色"
     assert specification.attributes["configuration_memory"] == "MEM16"
@@ -273,9 +280,206 @@ def test_apple_rejects_duplicate_html_sku_instead_of_silently_dropping_it() -> N
 
 def test_apple_rejects_duplicate_bootstrap_sku() -> None:
     selection = _bootstrap()
+    selection["products"][0]["btrOrFdPartNumber"] = "MBFIXTURECH/A"
     selection["products"].append(dict(selection["products"][0]))
     with pytest.raises(AppleParseError, match="repeats SKU"):
         _parse_bootstrap(selection)
+
+
+def test_apple_container_selections_use_exact_configurations_not_container_as_sku() -> None:
+    selection = _bootstrap()
+    other = deepcopy(selection["products"][0])
+    other["productConfiguration"]["memory"] = "MEM32"
+    other["productConfiguration"]["storage"] = "SSD1024"
+    other["priceKey"] = "configured-second"
+    selection["products"].append(other)
+    selection["mainDisplayValues"]["prices"]["configured-second"] = {
+        "currentPrice": {"raw_amount": "12999.00"}
+    }
+    product = _parse_bootstrap(selection)
+    assert len(product.rows) == 2
+    assert {row.item.external_sku_id for row in product.rows} == {None}
+    assert len({row.item.listing_key for row in product.rows}) == 2
+    assert [row.parsed.price_candidates[0].current_price for row in product.rows] == [
+        Decimal("9999.00"),
+        Decimal("12999.00"),
+    ]
+    for row in product.rows:
+        assert json.loads(row.item.listing_key)[1] == "spec"
+        specification = row.parsed.source_attributes["device_specification"]
+        assert "manufacturer_part_number" not in specification
+        assert specification["attributes"]["aos_container_part_number"] == "RO_MBA_FIXTURE"
+        assert (
+            DeviceCategoryRule().normalize(row.item, row.parsed).quality_status
+            is QualityStatus.ACCEPTED
+        )
+
+
+def test_apple_container_specification_is_unchanged_by_sku_identity_correction() -> None:
+    row = _parse_bootstrap(_bootstrap()).rows[0]
+    assert row.parsed.source_attributes["device_specification"] == {
+        "color": "午夜色",
+        "size": "13 英寸",
+        "attributes": {
+            "configuration_processor": "CHIP_FIXTURE",
+            "configuration_memory": "MEM16",
+            "configuration_storage": "SSD512",
+            "aos_container_part_number": "RO_MBA_FIXTURE",
+        },
+    }
+
+
+def test_apple_container_rejects_duplicate_configuration_even_with_different_price() -> None:
+    selection = _bootstrap()
+    other = deepcopy(selection["products"][0])
+    other["priceKey"] = "same-config-other-price"
+    selection["products"].append(other)
+    selection["mainDisplayValues"]["prices"]["same-config-other-price"] = {
+        "currentPrice": {"raw_amount": "12999.00"}
+    }
+    with pytest.raises(ValueError, match="duplicate listing identities"):
+        _parse_bootstrap(selection)
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    [
+        None,
+        {},
+        {"memory": "MEM16", "storage": "SSD512"},
+        {"processor": "CHIP", "memory": None, "storage": "SSD512"},
+        {"processor": "CHIP", "memory": " ", "storage": "SSD512"},
+        {"processor": "CHIP", "memory": ["MEM16", "MEM32"], "storage": "SSD512"},
+        {"processor": "CHIP", "memory": "MEM16", "storage": "SSD512", "display": {}},
+        {"case": "CASE_ONLY", "band": "SELECT_LATER"},
+    ],
+)
+def test_apple_container_requires_explicit_complete_component_choices(
+    configuration: object,
+) -> None:
+    selection = _bootstrap()
+    selection["products"][0]["productConfiguration"] = configuration
+    with pytest.raises(AppleParseError, match="explicit processor/memory/storage"):
+        _parse_bootstrap(selection)
+
+
+def test_apple_container_price_and_title_changes_do_not_change_identity() -> None:
+    selection = _bootstrap()
+    original = _parse_bootstrap(selection).rows[0]
+    selection["mainDisplayValues"]["prices"]["13inch-midnight"]["currentPrice"] = {
+        "raw_amount": "8999.00"
+    }
+    changed = _parse_bootstrap(selection).rows[0]
+    assert original.item.listing_key == changed.item.listing_key
+    assert original.parsed.source_attributes == changed.parsed.source_attributes
+    assert (
+        original.parsed.price_candidates[0].current_price
+        != changed.parsed.price_candidates[0].current_price
+    )
+    result = _result("product_macbook.html", "https://www.apple.com.cn/shop/buy-mac/macbook-air")
+    body = (
+        "<html><h1>A Different Product Title</h1><script>productSelectionData: "
+        f"{json.dumps(selection, ensure_ascii=False)}</script></html>"
+    ).encode()
+    renamed = (
+        AppleCatalogConnector()
+        .parse_product(_item(result.final_url, "LAPTOP"), replace(result, body=body))
+        .rows[0]
+    )
+    assert changed.item.listing_key == renamed.item.listing_key
+    assert changed.parsed.source_attributes == renamed.parsed.source_attributes
+
+
+def test_apple_genuine_sku_does_not_require_container_configuration() -> None:
+    selection = _bootstrap()
+    selection["products"][0]["btrOrFdPartNumber"] = "MBFIXTURECH/A"
+    selection["products"][0].pop("productConfiguration")
+    row = _parse_bootstrap(selection).rows[0]
+    assert row.item.external_sku_id == "MBFIXTURECH/A"
+    assert json.loads(row.item.listing_key)[1:] == ["sku", "MBFIXTURECH/A"]
+
+
+def test_apple_container_does_not_accept_starting_price_as_configuration_total() -> None:
+    selection = _bootstrap()
+    selection["mainDisplayValues"]["prices"]["13inch-midnight"]["currentPrice"] = {
+        "raw_amount": "RMB 9999 起"
+    }
+    with pytest.raises(ConditionalPriceError, match="conditional price"):
+        _parse_bootstrap(selection)
+
+
+@pytest.mark.parametrize("price_field", ["currentPrice", "previousPrice"])
+@pytest.mark.parametrize(
+    "amount",
+    [
+        {"raw_amount": "9999.00", "amount": "RMB 9,999 起"},
+        {"raw_amount": "9999.00", "amount": "RMB 9,999起"},
+        {"raw_amount": "RMB 9999起", "amount": "RMB 9,999"},
+        {"raw_amount": "9999.00", "amount": "券后 RMB 9,999"},
+    ],
+)
+def test_apple_bootstrap_checks_conditions_in_raw_and_display_amounts(
+    price_field: str, amount: dict[str, str]
+) -> None:
+    selection = _bootstrap()
+    selection["mainDisplayValues"]["prices"]["13inch-midnight"][price_field] = amount
+    with pytest.raises(ConditionalPriceError):
+        _parse_bootstrap(selection)
+
+
+@pytest.mark.parametrize("price_field", ["currentPrice", "previousPrice"])
+def test_apple_bootstrap_rejects_inconsistent_raw_and_display_amounts(price_field: str) -> None:
+    selection = _bootstrap()
+    selection["mainDisplayValues"]["prices"]["13inch-midnight"][price_field] = {
+        "raw_amount": "9999.00",
+        "amount": "RMB 10,999",
+    }
+    with pytest.raises(AppleParseError, match="amounts are inconsistent"):
+        _parse_bootstrap(selection)
+
+
+def test_apple_bootstrap_compares_equal_amounts_without_changing_selected_text() -> None:
+    selection = _bootstrap()
+    price = selection["mainDisplayValues"]["prices"]["13inch-midnight"]
+    price["currentPrice"] = {"raw_amount": "9999.00", "amount": "RMB 9,999"}
+    price["previousPrice"] = {"raw_amount": "10999.00", "amount": "RMB 10,999"}
+    candidate = _parse_bootstrap(selection).rows[0].parsed.price_candidates[0]
+    assert candidate.current_price == Decimal("9999.00")
+    assert candidate.original_price == Decimal("10999.00")
+    assert candidate.original_price_type is OriginalPriceType.CROSSED_OUT
+    assert candidate.displayed_price_text == "9999.00"
+
+
+def test_apple_bootstrap_does_not_mix_comparative_or_financing_prices_into_current() -> None:
+    selection = _bootstrap()
+    price = selection["mainDisplayValues"]["prices"]["13inch-midnight"]
+    price["currentPrice"] = {"raw_amount": "9999.00", "amount": "RMB 9,999"}
+    price.update(
+        {
+            "comparativeDisplayPrice": "RMB 9,999 起",
+            "fullPrice-comparative": "RMB 9,999 起",
+            "financing": "或 RMB 417/月 (24 期) 起",
+        }
+    )
+    candidate = _parse_bootstrap(selection).rows[0].parsed.price_candidates[0]
+    assert candidate.current_price == Decimal("9999.00")
+    assert candidate.original_price is None
+    assert candidate.displayed_price_text == "9999.00"
+
+
+@pytest.mark.parametrize(
+    ("amount", "expected"),
+    [
+        ({"amount": "RMB 9,999"}, "RMB 9,999"),
+        ({"raw_amount": None, "amount": "RMB 9,999"}, "RMB 9,999"),
+        ({"raw_amount": "9999.00", "amount": None}, "9999.00"),
+        ({"raw_amount": None, "amount": None}, None),
+    ],
+)
+def test_apple_bootstrap_missing_amount_representation_keeps_existing_fallback(
+    amount: dict[str, str | None], expected: str | None
+) -> None:
+    assert AppleCatalogConnector._bootstrap_price(amount) == expected
 
 
 def test_apple_rejects_incomplete_bootstrap_sku_prices() -> None:

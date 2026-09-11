@@ -204,14 +204,14 @@ class AppleCatalogConnector(CatalogConnector):
         for product in products:
             if not isinstance(product, dict):
                 raise AppleParseError("Apple selection contains an invalid product entry")
-            sku_id = normalize_text(
-                str(product.get("btrOrFdPartNumber") or product.get("aosContainerPartNumber") or "")
-            ).upper()
+            part_number = cls._optional_string(product.get("btrOrFdPartNumber"))
+            sku_id = part_number.upper() if part_number else None
+            container_part = cls._optional_string(product.get("aosContainerPartNumber"))
             price_key = normalize_text(str(product.get("priceKey", "")))
             price = prices.get(price_key)
-            if not sku_id or not isinstance(price, dict):
+            if not (sku_id or container_part) or not isinstance(price, dict):
                 raise AppleParseError("Apple selection is missing a SKU identity or price")
-            if sku_id in seen:
+            if sku_id is not None and sku_id in seen:
                 raise AppleParseError(f"Apple product repeats SKU: {sku_id}")
             current = price.get("currentPrice")
             current_text = cls._bootstrap_price(current) or cls._bootstrap_price(
@@ -219,9 +219,27 @@ class AppleCatalogConnector(CatalogConnector):
             )
             if current_text is None:
                 raise AppleParseError("Apple selection has no explicit current SKU amount")
-            seen.add(sku_id)
+            if sku_id is not None:
+                seen.add(sku_id)
             dimensions = cls._bootstrap_dimensions(product, main_values)
             configuration = product.get("productConfiguration")
+            # A container groups several build-to-order selections; it is not
+            # an official SKU. Only exact component choices can identify one.
+            if sku_id is None and (
+                not isinstance(configuration, dict)
+                or not {"processor", "memory", "storage"}.issubset(configuration)
+                or any(
+                    not isinstance(key, str)
+                    or not key.strip()
+                    or not isinstance(value, str)
+                    or not value.strip()
+                    for key, value in configuration.items()
+                )
+            ):
+                raise AppleParseError(
+                    "Apple container selection lacks explicit "
+                    "processor/memory/storage configuration"
+                )
             if isinstance(configuration, dict):
                 dimensions.update(
                     {
@@ -232,7 +250,6 @@ class AppleCatalogConnector(CatalogConnector):
                         if str(value).strip()
                     }
                 )
-            container_part = cls._optional_string(product.get("aosContainerPartNumber"))
             if container_part:
                 dimensions["aos_container_part_number"] = container_part
             original_text = cls._bootstrap_price(price.get("previousPrice"))
@@ -297,8 +314,17 @@ class AppleCatalogConnector(CatalogConnector):
     def _bootstrap_price(value: object) -> str | None:
         if isinstance(value, dict):
             raw = value.get("raw_amount")
+            display = value.get("amount")
+            if raw is not None and display is not None:
+                # Only compare representations of this exact amount. Nearby
+                # comparative/financing prices describe a different price basis.
+                policy = PricePolicy()
+                raw_price = policy.parse_candidate(PriceCandidate(normalize_text(str(raw))))
+                display_price = policy.parse_candidate(PriceCandidate(normalize_text(str(display))))
+                if raw_price != display_price:
+                    raise AppleParseError("Apple raw and displayed amounts are inconsistent")
             if raw is None:
-                raw = value.get("amount")
+                raw = display
             return normalize_text(str(raw)) if raw is not None else None
         if isinstance(value, (int, float, str)) and str(value).strip():
             return normalize_text(str(value))
@@ -310,7 +336,8 @@ class AppleCatalogConnector(CatalogConnector):
         product_name: str,
         raw: dict[str, object],
     ) -> ParsedCatalogRow:
-        part_number = normalize_text(str(raw["part_number"])).upper()
+        raw_part_number = self._optional_string(raw.get("part_number"))
+        part_number = raw_part_number.upper() if raw_part_number else None
         raw_dimensions = raw.get("dimensions")
         if not isinstance(raw_dimensions, dict):
             raise AppleParseError("Apple parsed SKU dimensions are invalid")

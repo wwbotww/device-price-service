@@ -672,6 +672,11 @@ class CatalogCrawlPipeline:
         missing_skus: bool = False,
     ) -> None:
         with self.session_factory.begin() as session:
+            if product is not None:
+                # Keep parent/row locks and current reads, without empty match-range
+                # gap locks blocking unrelated sources. This unit-only override is
+                # reset when the connection returns to the pool; datasets stay unchanged.
+                session.connection(execution_options={"isolation_level": "READ COMMITTED"})
             record = CatalogCrawlRepository(session).add_record(
                 crawl_run_id=run_id,
                 source_listing_id=None,
@@ -1082,11 +1087,12 @@ class CatalogCrawlPipeline:
     ) -> int:
         with self.session_factory.begin() as session:
             now = utc_now_naive()
-            # The named source/region lock is held. Leave other category scopes untouched.
+            # The named source/region lock already serializes recovery and startup.
+            # A range FOR UPDATE here would gap-lock other sources' new run inserts.
+            # Leave other category scopes untouched.
             stale_runs = (
                 session.scalars(
-                    select(CatalogCrawlRun)
-                    .where(
+                    select(CatalogCrawlRun).where(
                         CatalogCrawlRun.source_channel_id == channel_id,
                         CatalogCrawlRun.region_scope == request.region_scope.value,
                         CatalogCrawlRun.region_code == request.region_code,
@@ -1094,7 +1100,6 @@ class CatalogCrawlPipeline:
                         CatalogCrawlRun.started_at
                         < now - timedelta(minutes=self.stale_run_after_minutes),
                     )
-                    .with_for_update()
                 ).all()
                 if isinstance(connector, CatalogConnector) and not request.source_item_codes
                 else []

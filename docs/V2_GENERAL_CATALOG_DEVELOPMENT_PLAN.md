@@ -1,6 +1,6 @@
 # V2 全品类采集：政府生鲜与官方设备实施计划
 
-> 状态：当前执行基准；政府生鲜 A～H、设备阶段 I～L 已完成；M 真实验收待实施
+> 状态：当前执行基准；政府生鲜 A～H、设备 I～L 已完成；M 因 6 组历史 iMac 重复身份未通过最终验收，待限定修复授权
 > 数据库设计：[V2 全品类价格采集数据库设计](V2_GENERAL_CATALOG_DATABASE_DESIGN.md)
 > 历史路线：[V2 阶段 E 大型电商可行性报告](V2_PHASE_E_FEASIBILITY_REPORT.md)
 > 适用数据库：MySQL 5.7.36 与 MySQL 8.x
@@ -216,13 +216,13 @@ demo 默认策略保持简单：
 
 ## 10. 开发顺序与交付物
 
-政府阶段 A～H 的开发与公司库验收已经完成。设备 I～L 已完成，见[阶段 I 报告](V2_PHASE_I_BUILD_REPORT.md)、[阶段 J 报告](V2_PHASE_J_BUILD_REPORT.md)、[阶段 K 报告](V2_PHASE_K_BUILD_REPORT.md)及[阶段 L 报告](V2_PHASE_L_BUILD_REPORT.md)，后续 M 待实施：
+政府阶段 A～H 的开发与公司库验收已经完成。设备 I～L 已完成，见[阶段 I 报告](V2_PHASE_I_BUILD_REPORT.md)、[阶段 J 报告](V2_PHASE_J_BUILD_REPORT.md)、[阶段 K 报告](V2_PHASE_K_BUILD_REPORT.md)及[阶段 L 报告](V2_PHASE_L_BUILD_REPORT.md)。M 的备份、迁移、五品牌采集及本地回归已完成；严格重放发现 6 组历史 iMac 重复身份，未通过最终验收，待限定修复授权，见[阶段 M 验收记录](V2_PHASE_M_ACCEPTANCE_REPORT.md)：
 
 1. I（已完成）：产品多 SKU DTO、设备种子、标准身份和无价状态语义；
 2. J（已完成）：Apple 原生 V2 贯通，共用行处理、型号/规格匹配及入库；
 3. K（已完成）：五品牌推广，以及异常价格、缺失和批次保护；旧设备采集入口已停用；
 4. L（已完成）：统一 CLI、原时点只读重放、V2 审计和显式设备调度；删除旧业务链路，仅依赖 13 张 V2 表，不删除旧物理表；
-5. M：双版本测试、镜像与真实采集验收，核对政府数据和 V1 静态数据未受影响。
+5. M（未通过最终验收，待限定修复授权）：备份恢复、迁移与五品牌复采完成，head 为 `b72c910e4f31`；461 项单元测试、双 MySQL 各 128 项集成测试及镜像离线 smoke 通过。数据库审计无 critical、165 份证据引用检查通过，V1/政府既有行和其他 schema 结构未变；但严格重放发现 6 组历史 iMac 重复身份，不能仅凭 healthy 结项。拟限定合并这 6 组身份并保留全部价格时点与证据，尚未执行，所有采集已停止。
 
 详细出口见[设备改造计划](V2_DEVICE_NATIVE_COLLECTION_PLAN.md#8-分阶段实施与验收)。不增加持续运行或监控平台；现有简单调度改为可选的统一 V2 调用入口，默认不启动。
 

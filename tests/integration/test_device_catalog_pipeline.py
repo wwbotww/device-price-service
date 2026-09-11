@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from threading import Barrier, Lock, local
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
 from schema_support import reflect_legacy_tables
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, event, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from device_price_service.crawlers.catalog import CatalogConnector
@@ -21,6 +24,7 @@ from device_price_service.crawlers.xiaomi import XiaomiCatalogConnector
 from device_price_service.db.catalog_models import (
     CatalogBrand,
     CatalogCrawlRecord,
+    CatalogCrawlRun,
     CatalogItem,
     CatalogPriceCurrent,
     CatalogPriceObservationRecord,
@@ -53,7 +57,7 @@ class DeviceFixtureFetcher:
         self.brand = brand
         self.discovery_url = {
             "huawei": "https://www.vmall.com/",
-            "xiaomi": "https://www.mi.com/shop/",
+            "xiaomi": "https://www.mi.com/shop",
             "oppo": "https://www.opposhop.cn/",
             "vivo": "https://shop.vivo.com.cn/product/10001186",
         }[brand]
@@ -138,6 +142,146 @@ def _pipeline(
         artifact_store=store,
         category_rules=build_catalog_rule_registry(),
     )
+
+
+@pytest.mark.parametrize("synchronize_at", ["start_run", "first_match"])
+def test_different_device_sources_can_start_and_match_concurrently(
+    mysql_engine: Engine,
+    migrated_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synchronize_at: str,
+) -> None:
+    fetchers = [DeviceFixtureFetcher(brand) for brand in ("huawei", "xiaomi")]
+    pipelines = [
+        _pipeline(
+            mysql_engine,
+            migrated_session_factory,
+            fetcher,
+            RawArtifactStore(tmp_path / fetcher.brand),
+        )
+        for fetcher in fetchers
+    ]
+    rendezvous = Barrier(2, timeout=10)
+    thread_state = local()
+    match_isolation_levels: list[str] = []
+    device_connections: set[int] = set()
+    returned_isolation_levels: list[str] = []
+    start_lock = Lock()
+    original_start = CatalogCrawlPipeline._start_run
+
+    def serialized_start(self: CatalogCrawlPipeline, *args: Any, **kwargs: Any) -> int:
+        # Isolate the match regression from the independent startup gap-lock regression.
+        with start_lock:
+            return original_start(self, *args, **kwargs)
+
+    if synchronize_at == "first_match":
+        monkeypatch.setattr(CatalogCrawlPipeline, "_start_run", serialized_start)
+
+    def synchronize_reads(
+        connection: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        is_start = "FROM v2_crawl_run" in statement and "v2_crawl_run.started_at <" in statement
+        is_match = (
+            "FROM v2_listing_match" in statement
+            and "v2_listing_match.effective_to IS NULL" in statement
+        )
+        if is_match:
+            device_connections.add(id(connection.connection.driver_connection))
+        selected = is_start if synchronize_at == "start_run" else is_match
+        if selected and not getattr(thread_state, "synchronized", False):
+            thread_state.synchronized = True
+            if is_match:
+                match_isolation_levels.append(connection.get_isolation_level())
+            # Both empty-range reads must finish before either transaction inserts.
+            # Under REPEATABLE READ + FOR UPDATE, their gap locks deadlock on insert.
+            rendezvous.wait()
+
+    def check_returned_isolation(dbapi_connection: Any, _record: Any) -> None:
+        if id(dbapi_connection) in device_connections:
+            returned_isolation_levels.append(
+                mysql_engine.dialect.get_isolation_level(dbapi_connection)
+            )
+
+    def collect(index: int):
+        fetcher = fetchers[index]
+        return asyncio.run(pipelines[index].run(_connector(fetcher), _request(fetcher.brand)))
+
+    event.listen(mysql_engine, "after_cursor_execute", synchronize_reads)
+    event.listen(mysql_engine.pool, "checkin", check_returned_isolation)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            outcomes = list(executor.map(collect, range(2)))
+    finally:
+        event.remove(mysql_engine, "after_cursor_execute", synchronize_reads)
+        event.remove(mysql_engine.pool, "checkin", check_returned_isolation)
+
+    assert all(outcome.status is RunStatus.SUCCEEDED for outcome in outcomes)
+    assert [outcome.accepted_count for outcome in outcomes] == [2, 3]
+    assert all(outcome.failed_count == 0 for outcome in outcomes)
+    if synchronize_at == "first_match":
+        assert match_isolation_levels == ["READ COMMITTED", "READ COMMITTED"]
+        assert len(device_connections) == 2
+    assert device_connections
+    assert len(returned_isolation_levels) >= 2
+    assert set(returned_isolation_levels) == {"REPEATABLE READ"}
+    with migrated_session_factory() as session:
+        assert set(session.scalars(select(CatalogCrawlRun.status))) == {RunStatus.SUCCEEDED.value}
+        assert session.scalar(select(func.count()).select_from(CatalogCrawlRun)) == 2
+        assert session.scalar(select(func.count()).select_from(CatalogItem)) == 2
+        for model in (ListingMatch, CatalogPriceCurrent, CatalogPriceObservationRecord):
+            assert session.scalar(select(func.count()).select_from(model)) == 5
+    # A unit's isolation override must not leak into later pool checkouts or server defaults.
+    with mysql_engine.connect() as connection:
+        assert connection.get_isolation_level() == "REPEATABLE READ"
+
+
+def test_device_transaction_isolation_resets_after_product_rollback(
+    mysql_engine: Engine,
+    migrated_session_factory: sessionmaker[Session],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher = DeviceFixtureFetcher("huawei")
+    pipeline = _pipeline(
+        mysql_engine, migrated_session_factory, fetcher, RawArtifactStore(tmp_path / "raw")
+    )
+    device_connections: set[int] = set()
+    returned_isolation_levels: list[str] = []
+
+    def fail_product(session: Session, *_args: Any, **_kwargs: Any) -> None:
+        connection = session.connection()
+        assert connection.get_isolation_level() == "READ COMMITTED"
+        device_connections.add(id(connection.connection.driver_connection))
+        raise RuntimeError("force a unit rollback after evidence insertion")
+
+    def check_returned_isolation(dbapi_connection: Any, _record: Any) -> None:
+        if id(dbapi_connection) in device_connections:
+            returned_isolation_levels.append(
+                mysql_engine.dialect.get_isolation_level(dbapi_connection)
+            )
+
+    monkeypatch.setattr(pipeline, "_persist_row", fail_product)
+    event.listen(mysql_engine.pool, "checkin", check_returned_isolation)
+    try:
+        outcome = asyncio.run(pipeline.run(_connector(fetcher), _request(fetcher.brand)))
+    finally:
+        event.remove(mysql_engine.pool, "checkin", check_returned_isolation)
+
+    assert outcome.status is RunStatus.FAILED and outcome.failed_count == 1
+    assert device_connections and returned_isolation_levels
+    assert set(returned_isolation_levels) == {"REPEATABLE READ"}
+    with migrated_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(CatalogItem)) == 0
+        assert session.scalar(select(func.count()).select_from(ListingMatch)) == 0
+        assert session.scalar(select(func.count()).select_from(CatalogPriceCurrent)) == 0
+        record = session.scalars(select(CatalogCrawlRecord)).one()
+        assert record.error_code == "RUNTIMEERROR"
 
 
 @pytest.mark.parametrize("brand", ["huawei", "xiaomi", "oppo", "vivo"])
