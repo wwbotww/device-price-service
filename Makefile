@@ -1,4 +1,4 @@
-.PHONY: setup browser-install db-up db-down mysql57-up mysql57-down migrate seed seed-v2-fresh seed-v2-government seed-v2-devices catalog-sources catalog-smoke catalog-crawl test test-unit test-integration test-integration-mysql57 lint format db-check db-audit adapters crawl replay scheduler
+.PHONY: setup browser-install db-up db-down mysql57-up mysql57-down migrate seed-v2-fresh seed-v2-government seed-v2-devices catalog-sources catalog-smoke catalog-crawl catalog-replay test test-unit test-integration test-integration-mysql57 lint format db-check db-audit scheduler
 
 setup:
 	uv sync
@@ -20,9 +20,6 @@ mysql57-down:
 
 migrate:
 	uv run alembic upgrade head
-
-seed:
-	uv run device-price db seed
 
 seed-v2-fresh:
 	uv run device-price db seed-v2-fresh
@@ -46,19 +43,13 @@ db-check:
 	uv run device-price db check
 
 db-audit:
-	uv run device-price db audit
+	uv run device-price db audit $(if $(filter 1,$(CHECK_ARTIFACTS)),--check-artifacts,)
 
-adapters:
-	uv run device-price adapters
-
-crawl:
-	uv run device-price crawl --brand "$(BRAND)" --mode "$(or $(MODE),full)"
-
-replay:
-	uv run device-price replay --record-id "$(RECORD_ID)"
+catalog-replay:
+	uv run device-price catalog replay --record-id "$(RECORD_ID)"
 
 scheduler:
-	uv run device-price scheduler
+	uv run device-price scheduler $(foreach channel,$(CHANNELS),--channel "$(channel)")
 
 test:
 	uv run pytest

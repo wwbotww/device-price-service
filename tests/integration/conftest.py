@@ -6,6 +6,7 @@ from collections.abc import Iterator
 import pytest
 from alembic import command
 from alembic.config import Config
+from schema_support import drop_test_tables
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -35,17 +36,17 @@ def mysql_engine() -> Iterator[Engine]:
 
 @pytest.fixture()
 def session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Session]]:
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
     Base.metadata.create_all(mysql_engine)
     factory = create_session_factory(mysql_engine)
     yield factory
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
 
 
 @pytest.fixture()
 def migrated_session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Session]]:
     """Use the actual Alembic schema, including MySQL 5.7 compatibility triggers."""
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
     config = Config("alembic.ini")
     config.set_main_option("sqlalchemy.url", mysql_engine.url.render_as_string(hide_password=False))
     command.stamp(config, "base", purge=True)
@@ -54,5 +55,5 @@ def migrated_session_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Sess
     yield factory
     # Fixture cleanup is deliberately destructive inside the guarded test schema.
     # Production downgrades refuse to discard new device evidence/state facts.
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
     command.stamp(config, "base", purge=True)

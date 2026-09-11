@@ -6,9 +6,8 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Annotated
 
-import structlog
 import typer
-from sqlalchemy import inspect, select, text
+from sqlalchemy import inspect, text
 
 from device_price_service.config import Settings, get_settings
 from device_price_service.crawlers.base import AdapterContext
@@ -46,20 +45,7 @@ from device_price_service.db.catalog_seed import (
     seed_shanghai_fresh_source,
 )
 from device_price_service.db.device_seed import DEVICE_CATEGORY_SEEDS, seed_device_catalog
-from device_price_service.db.models import (
-    Brand,
-    Category,
-    CrawlRecord,
-    CrawlRun,
-    OfficialOffer,
-    PriceCurrent,
-    PriceHistory,
-    Product,
-    SalesChannel,
-    Sku,
-)
 from device_price_service.db.mysql_compat import compatibility_mode, validate_mysql_version
-from device_price_service.db.seed import seed_reference_data
 from device_price_service.db.session import create_database_engine, create_session_factory
 from device_price_service.domain.catalog_crawl import CatalogCollectionRequest
 from device_price_service.domain.catalog_enums import RegionScope
@@ -74,6 +60,8 @@ from device_price_service.runtime import (
     build_catalog_rule_registry,
     build_catalog_runtime,
 )
+from device_price_service.scheduler import CrawlScheduler
+from device_price_service.services.artifact_store import ArtifactError, RawArtifactStore
 from device_price_service.services.catalog_crawl_pipeline import CatalogConfigurationError
 from device_price_service.services.catalog_preparation import (
     PreparedCatalogRows,
@@ -81,6 +69,7 @@ from device_price_service.services.catalog_preparation import (
     prepare_catalog_rows,
 )
 from device_price_service.services.database_audit import audit_database
+from device_price_service.services.replay_service import ReplayService
 
 app = typer.Typer(help="Auditable public price collection service")
 db_app = typer.Typer(help="Database lifecycle commands")
@@ -88,18 +77,6 @@ catalog_app = typer.Typer(help="V2 government and official-device price collecti
 app.add_typer(db_app, name="db")
 app.add_typer(catalog_app, name="catalog")
 
-V1_TABLES = {
-    Brand.__tablename__,
-    Category.__tablename__,
-    Product.__tablename__,
-    Sku.__tablename__,
-    SalesChannel.__tablename__,
-    OfficialOffer.__tablename__,
-    PriceCurrent.__tablename__,
-    PriceHistory.__tablename__,
-    CrawlRun.__tablename__,
-    CrawlRecord.__tablename__,
-}
 V2_TABLES = {
     CatalogBrand.__tablename__,
     TaxonomyCategory.__tablename__,
@@ -115,7 +92,6 @@ V2_TABLES = {
     CatalogCrawlRun.__tablename__,
     CatalogCrawlRecord.__tablename__,
 }
-EXPECTED_TABLES = V1_TABLES | V2_TABLES
 
 
 @app.callback()
@@ -128,42 +104,27 @@ def main(
 
 @db_app.command("check")
 def db_check() -> None:
+    """Check MySQL compatibility and the 13 required V2 tables; ignore extra historical tables."""
     engine = create_database_engine()
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
-        raw_version = str(connection.scalar(text("SELECT VERSION()")))
-        version = validate_mysql_version(raw_version)
-        session_time_zone = str(connection.scalar(text("SELECT @@session.time_zone")))
-    actual_tables = set(inspect(engine).get_table_names())
-    missing = EXPECTED_TABLES - actual_tables
-    unexpected = actual_tables - EXPECTED_TABLES - {"alembic_version"}
-    if missing or unexpected:
-        typer.echo(f"missing={sorted(missing)} unexpected={sorted(unexpected)}", err=True)
-        raise typer.Exit(code=1)
-    typer.echo(
-        f"database connection OK; all {len(EXPECTED_TABLES)} application tables are present; "
-        f"server={raw_version}; mode={compatibility_mode(version)}; "
-        f"session_time_zone={session_time_zone}"
-    )
-
-
-@db_app.command("seed")
-def db_seed() -> None:
-    engine = create_database_engine()
-    factory = create_session_factory(engine)
-    with factory.begin() as session:
-        seed_reference_data(session)
-    with factory() as session:
-        counts = {
-            "brands": len(session.scalars(select(Brand)).all()),
-            "categories": len(session.scalars(select(Category)).all()),
-            "channels": len(session.scalars(select(SalesChannel)).all()),
-        }
-    structlog.get_logger().info("reference_data_seeded", **counts)
-    typer.echo(
-        f"seed complete: {counts['brands']} brands, {counts['categories']} categories, "
-        f"{counts['channels']} channels"
-    )
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            raw_version = str(connection.scalar(text("SELECT VERSION()")))
+            version = validate_mysql_version(raw_version)
+            session_time_zone = str(connection.scalar(text("SELECT @@session.time_zone")))
+            actual_tables = set(inspect(connection).get_table_names())
+        missing = V2_TABLES - actual_tables
+        if missing:
+            typer.echo(f"missing V2 tables={sorted(missing)}; run alembic upgrade head", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(
+            f"database connection OK; all {len(V2_TABLES)} V2 tables are present; "
+            f"server={raw_version}; mode={compatibility_mode(version)}; "
+            f"session_time_zone={session_time_zone}; "
+            f"additional_tables_ignored={len(actual_tables - V2_TABLES - {'alembic_version'})}"
+        )
+    finally:
+        engine.dispose()
 
 
 @db_app.command("seed-v2-fresh")
@@ -205,17 +166,27 @@ def db_seed_v2_government(
 
 
 @db_app.command("audit")
-def db_audit() -> None:
-    """Run read-only consistency and freshness checks for monitoring."""
+def db_audit(
+    check_artifacts: Annotated[
+        bool,
+        typer.Option(help="Also verify local evidence files and hashes; never fetch missing files"),
+    ] = False,
+) -> None:
+    """Read-only V2 consistency/freshness audit; does not inspect historical V1 data."""
     settings = get_settings()
     engine = create_database_engine(settings)
-    with engine.connect() as connection:
-        report = audit_database(
-            connection,
-            stale_run_minutes=settings.crawl_stale_after_minutes,
-            stale_price_hours=settings.full_crawl_interval_hours * 2,
-            require_completed_runs=settings.live_crawl_enabled,
-        )
+    try:
+        with engine.connect() as connection:
+            report = audit_database(
+                connection,
+                stale_run_minutes=settings.crawl_stale_after_minutes,
+                stale_price_hours=settings.full_crawl_interval_hours * 2,
+                artifact_store=RawArtifactStore(settings.raw_storage_path)
+                if check_artifacts
+                else None,
+            )
+    finally:
+        engine.dispose()
     typer.echo(
         json.dumps(
             {
@@ -256,52 +227,42 @@ def db_seed_devices(
         engine.dispose()
 
 
-@app.command("adapters")
-def list_adapters() -> None:
-    """Retired V1 source listing; use catalog sources."""
-    raise typer.BadParameter("V1 adapters are retired; use catalog sources")
-
-
-@app.command("crawl")
-def crawl(
-    brand: Annotated[
-        str,
-        typer.Option("--brand", "-b", help="Retired; use catalog crawl --channel"),
-    ],
-    mode: Annotated[str, typer.Option(help="Only full is supported in V1")] = "full",
-) -> None:
-    """Retired V1 collection; use catalog crawl."""
-    settings = get_settings()
-    _require_live_crawl(settings.live_crawl_enabled)
-    _require_legacy_brand(brand)
-
-
-@app.command("smoke")
-def smoke(
-    brand: Annotated[
-        str,
-        typer.Option("--brand", "-b", help="Retired; use catalog smoke --channel"),
-    ],
-    max_products: Annotated[int, typer.Option(min=1, max=5)] = 1,
-) -> None:
-    """Retired V1 live validation; use catalog smoke."""
-    settings = get_settings()
-    _require_live_crawl(settings.live_crawl_enabled)
-    _require_legacy_brand(brand)
-
-
-@app.command("replay")
-def replay(
-    record_id: Annotated[int, typer.Option("--record-id", min=1)],
-) -> None:
-    """Retired V1 replay; unified V2 replay is not available yet."""
-    raise typer.BadParameter("V1 replay is retired; catalog replay is planned for phase L")
-
-
 @app.command("scheduler")
-def scheduler() -> None:
-    """Retired V1 scheduler; optional V2 scheduling is not available yet."""
-    raise typer.BadParameter("V1 scheduler is retired; V2 scheduling is planned for phase L")
+def scheduler(
+    channels: Annotated[
+        list[str],
+        typer.Option(
+            "--channel", "-c", help="Explicit enabled device channel; repeat to select more"
+        ),
+    ],
+) -> None:
+    """Optional interval collection of selected V2 devices; never schedules government data."""
+    settings = get_settings()
+    _require_live_crawl(settings.live_crawl_enabled)
+    # Reject unsupported selections before constructing any database/fetcher resources.
+    normalized = tuple(channel.strip().upper() for channel in channels)
+    if not normalized or len(set(normalized)) != len(normalized):
+        raise typer.BadParameter("select unique device channels")
+    for channel in normalized:
+        if not isinstance(_catalog_connector(channel), CatalogConnector):
+            raise typer.BadParameter("scheduler only supports explicitly selected device sources")
+    asyncio.run(_serve_catalog_scheduler(settings, normalized))
+
+
+async def _serve_catalog_scheduler(settings: Settings, channels: tuple[str, ...]) -> None:
+    runtime = build_catalog_runtime(settings)
+    try:
+        scheduler = CrawlScheduler(
+            pipeline=runtime.pipeline,
+            registry=runtime.registry,
+            channel_codes=channels,
+            full_crawl_interval_hours=settings.full_crawl_interval_hours,
+        )
+        await scheduler.serve()
+    except (CatalogConfigurationError, ValueError) as error:
+        raise typer.BadParameter(str(error)) from error
+    finally:
+        await runtime.aclose()
 
 
 @catalog_app.command("sources")
@@ -310,6 +271,42 @@ def list_catalog_sources() -> None:
 
     for connector in build_catalog_registry():
         typer.echo(f"{connector.channel_code}\t{connector.connector_code}\t{connector.version}")
+
+
+@catalog_app.command("replay")
+def catalog_replay(
+    record_id: Annotated[int, typer.Option("--record-id", min=1)],
+) -> None:
+    """Reparse stored V2 evidence read-only, with its original timestamp; never fetch or write."""
+    settings = get_settings()
+    engine = create_database_engine(settings)
+    try:
+        outcome = ReplayService(
+            session_factory=create_session_factory(engine),
+            artifact_store=RawArtifactStore(settings.raw_storage_path),
+            registry=build_catalog_registry(),
+            rule_registry=build_catalog_rule_registry(),
+        ).replay(record_id)
+        payload = outcome.to_dict()
+    except (ValueError, OSError, ArtifactError) as error:
+        typer.echo(
+            json.dumps(
+                {
+                    "record_id": record_id,
+                    "status": RunStatus.FAILED.value,
+                    "error_code": getattr(error, "error_code", type(error).__name__),
+                    "error": str(error),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        raise typer.Exit(code=1) from error
+    finally:
+        engine.dispose()
+    typer.echo(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    if payload["status"] != RunStatus.SUCCEEDED.value:
+        raise typer.Exit(code=1)
 
 
 @catalog_app.command("smoke")
@@ -356,8 +353,6 @@ def catalog_crawl(
     settings = get_settings()
     _require_live_crawl(settings.live_crawl_enabled)
     asyncio.run(_catalog_crawl_once(settings, channel, commodity))
-
-
 
 
 def _shanghai_catalog_request() -> CatalogCollectionRequest:
@@ -634,19 +629,6 @@ async def _catalog_crawl_once(
         raise typer.Exit(code=2) from error
     finally:
         await runtime.aclose()
-
-
-def _require_legacy_brand(brand: str) -> None:
-    for connector in build_catalog_registry():
-        if (
-            isinstance(connector, CatalogConnector)
-            and connector.brand_code == brand.strip().upper()
-        ):
-            raise typer.BadParameter(
-                f"{connector.brand_code} now uses V2; use catalog crawl/smoke "
-                f"--channel {connector.channel_code}"
-            )
-    raise typer.BadParameter("V1 collection is retired; use catalog sources to select a channel")
 
 
 def _require_live_crawl(enabled: bool) -> None:

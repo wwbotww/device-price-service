@@ -16,7 +16,7 @@ from device_price_service.domain.crawl import (
     FetchResult,
 )
 from device_price_service.domain.enums import FetchMethod
-from device_price_service.domain.models import utc_now_naive
+from device_price_service.domain.time import utc_now_naive
 from device_price_service.fetchers.http import ResponseTooLargeError
 from device_price_service.fetchers.url_policy import UrlPolicy, UrlPolicyError
 

@@ -6,11 +6,9 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from device_price_service.config import get_settings
-from device_price_service.db import (
-    catalog_models,  # noqa: F401
-    models,  # noqa: F401
-)
+from device_price_service.db import catalog_models  # noqa: F401
 from device_price_service.db.base import Base
+from migrations.schema_scope import include_name
 
 config = context.config
 if config.config_file_name is not None:
@@ -28,6 +26,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
         compare_type=True,
+        include_name=include_name,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -44,6 +43,7 @@ def run_migrations_online() -> None:
             connection=connection,
             target_metadata=target_metadata,
             compare_type=True,
+            include_name=include_name,
         )
         with context.begin_transaction():
             context.run_migrations()

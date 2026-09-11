@@ -1,1 +1,1 @@
-"""Cross-brand data quality validation."""
+"""Source-independent catalog price validation."""

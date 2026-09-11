@@ -1,17 +1,17 @@
 # 运行与故障处理手册
 
-> 适用版本：V2 政府生鲜 + 五品牌原生设备；I～K 已完成，L～M 待实施
+> 适用版本：V2 政府生鲜 + 五品牌原生设备；I～L 已完成，M 真实验收待实施
 > 数据库：MySQL 5.7.36 或 MySQL 8.x
 > 原则：生产凭据不落盘；集成测试永远不指向公司库；真实采集必须通过门禁
 
-V2 已在公司 `device_price` 部署：商务部 15 个跨地区批发品种为主来源，上海 8 个零售均价为补充。项目只提供手工 smoke 和单次采集，不注册 V2 常驻调度。2026-08-25 的重建、备份、数据量和质量核对见 [阶段 H 公司库验收报告](V2_PHASE_H_COMPANY_ACCEPTANCE_REPORT.md)。
+公司 `device_price` 已部署的是 V2 政府生鲜：商务部 15 个跨地区批发品种为主来源，上海 8 个零售均价为补充。设备 I～L 改造尚未部署公司库。默认手工 smoke 和单次采集，设备调度仅作为显式可选入口，政府不自动调度。2026-08-25 的重建、备份、数据量和质量核对见 [阶段 H 公司库验收报告](V2_PHASE_H_COMPANY_ACCEPTANCE_REPORT.md)。
 
 ## 1. 首次部署
 
 1. 建立专用空库，字符集 `utf8mb4`、排序规则 `utf8mb4_general_ci`；
 2. 通过进程环境或公司密钥系统注入 `MYSQL_*`，不要写入 `.env`、镜像或命令历史；
 3. 执行 `uv run alembic upgrade head`；
-4. V1 demo 需要参考数据时执行 `uv run device-price db seed`；只运行政府数据时无需写 V1 种子；
+4. 需要采集设备时执行 `uv run device-price db seed-devices`，默认来源禁用且不访问网站；
 5. 执行 `uv run device-price db seed-v2-government`，确认两个来源默认禁用；
 6. 执行 `uv run device-price db check`；
 7. 执行 `uv run device-price db audit`；
@@ -24,12 +24,13 @@ V2 已在公司 `device_price` 部署：商务部 15 个跨地区批发品种为
 ## 2. 运行入口
 
 ```bash
-uv run device-price adapters
-uv run device-price crawl --brand HUAWEI
-uv run device-price scheduler
+uv run device-price catalog sources
+# 先确认来源、目标库与真实访问授权，再显式打开开关
+LIVE_CRAWL_ENABLED=true uv run device-price catalog smoke --channel HUAWEI_CN_WEB
+LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel HUAWEI_CN_WEB
 ```
 
-调度器每品牌只允许一个实例，进程间由 MySQL 命名锁互斥。建议容器设置自动重启，但不要同时启动多个用途相同的常驻调度容器。
+采集只有 `catalog` 一条业务入口，设备与政府共享 V2 流水线。只读重放见第 2.6 节，可选设备调度见第 2.7 节；默认不开启后台任务。
 
 ### 2.1 V2 政府来源
 
@@ -64,7 +65,7 @@ LIVE_CRAWL_ENABLED=true \
   --channel MOFCOM_FRESH_WHOLESALE --commodity ALL
 ```
 
-上海 `catalog crawl` 每批发现目录和文章各一次、下载 XLS 一次；8 条价格共享一个 `v2_crawl_record`。商务部每个品种页独立发现和下载，页面内所有市场价格共享一个 `v2_crawl_record`；省略 `--commodity` 或使用 `ALL` 会按白名单顺序执行 15 个独立批次。关闭对应 `v2_source_channel.enabled` 即可阻止后续写入。V2 demo 不运行 scheduler。
+上海 `catalog crawl` 每批发现目录和文章各一次、下载 XLS 一次；8 条价格共享一个 `v2_crawl_record`。商务部每个品种页独立发现和下载，页面内所有市场价格共享一个 `v2_crawl_record`；省略 `--commodity` 或使用 `ALL` 会按白名单顺序执行 15 个独立批次。关闭对应 `v2_source_channel.enabled` 即可阻止后续写入。政府来源不注册 scheduler。
 
 ### 2.2 当前公司库状态（2026-09-10）
 
@@ -80,9 +81,9 @@ LIVE_CRAWL_ENABLED=true \
 
 ### 2.3 单独恢复或更新 V1 设备 demo
 
-本节原五品牌流程已于 2026-09-10 验证，属于历史基线。阶段 K 后，当前分支不再提供 V1 设备重采；旧 `crawl/smoke --brand`、`adapters`、`replay`、`scheduler` 直接退出并提示改用 V2，不会访问旧业务库。新采集使用第 2.5 节，不清表、不搬运旧价格。
+本节原五品牌流程已于 2026-09-10 验证，属于历史基线。当前分支不再提供 V1 设备重采；旧顶层 `crawl/smoke --brand`、`adapters`、`replay` 和 `db seed` 已删除。新采集使用第 2.5 节，可选 scheduler 只调用 V2，不清表、不搬运旧价格。
 
-`db seed/check/audit` 仍是历史工具，待阶段 L 改造；`db seed` 会写 V1 参考表，不能把它当作 V2 初始化，`db audit` 也不能用来宣称 V2 已验收。V1 静态内容继续保留，原采集结果见[V1 重采报告](V1_RECOLLECTION_20260910_REPORT.md)。
+`db check/audit` 已统一为 V2 工具，不检查或写入 V1 数据；V1 静态内容继续保留，原采集结果见[V1 重采报告](V1_RECOLLECTION_20260910_REPORT.md)。
 
 已写入的 V1 价格可用以下只读查询查看（时间字段为 UTC）：
 
@@ -98,7 +99,7 @@ JOIN brand b ON b.id = p.brand_id
 ORDER BY b.code, p.id, s.id;
 ```
 
-### 2.4 设备 V2 基础初始化（阶段 I～K，本地验证）
+### 2.4 设备 V2 基础初始化（阶段 I～L，本地验证）
 
 代码 head 已追加为 `b72c910e4f31`，公司库状态仍以上文 2026-09-10 的记录为准，本轮没有连接或迁移公司库。此迁移只更新 V2 产品证据和无价状态约束，不新增/删除业务表，也不从 V1 复制价格。先将 `MYSQL_*` 指向本地专用开发库，检查连接目标后执行：
 
@@ -110,7 +111,9 @@ uv run device-price catalog sources
 
 种子输出应为 `5 brands, 7 categories, 5 sources; enabled=0; no collection started`（全新设备种子时）。重复执行不会产生重复记录，不会关闭已有启用来源，也不会修改政府种子。五个品牌为 Apple、华为、小米、OPPO、vivo，设备分类含两个父节点和手机、平板、笔记本、台式机、手表五个叶节点。
 
-`db seed-devices --enable` 仅显式启用数据库中的设备来源，不访问官网或启动采集。`catalog sources` 现在显示两个政府连接器和五品牌设备，均可用 `catalog crawl`；不能把旧 `crawl --brand` 当作 V2 写库入口。`db check/audit` 的 V1 依赖尚未退出。
+`db seed-devices --enable` 仅显式启用数据库中的设备来源，不访问官网或启动采集。`catalog sources` 显示两个政府连接器和五品牌设备，均可用 `catalog crawl`；不能把旧 `crawl --brand` 当作 V2 写库入口。`db check` 只要求 13 张 V2 表，缺少 V1 不阻止运行；额外表可共存且被忽略。`db audit` 也只检查 V2。
+
+业务运行时元数据只注册 V2；历史 Alembic 链保持不变，完整升级仍创建 V1 10 表和 V2 13 表。自动生成迁移只反射 `v2_` 表，排除旧表和其他业务表，本阶段没有新增删表迁移。正式部署使用 Alembic，不能用 `metadata.create_all` 代替 MySQL 5.7 触发器安装。
 
 双版本验收仅使用本地专用 `device_price_test`：
 
@@ -125,7 +128,7 @@ RUN_MYSQL_INTEGRATION=1 TEST_MYSQL_HOST=127.0.0.1 \
 
 ### 2.5 五品牌原生 V2 入口（阶段 J～K）
 
-阶段 I～K 仅用脱敏 fixture 和本地 MySQL 验收，尚未运行本轮真实商城采集。价格突变复核、缺失和批次保护已接入，完整重放/audit 在 L，暂不部署公司库。之后获准真实验证时，先确认目标库与开关，再执行（渠道可替换为 `HUAWEI_CN_WEB/XIAOMI_CN_WEB/OPPO_CN_WEB/VIVO_CN_WEB`）：
+阶段 I～L 仅用脱敏 fixture 和本地 MySQL 验收，尚未运行本轮真实商城采集。价格突变复核、缺失和批次保护、完整只读重放/audit 均已接入，暂不部署公司库。之后进行获准真实验证时，先确认目标库与开关，再执行（渠道可替换为 `HUAWEI_CN_WEB/XIAOMI_CN_WEB/OPPO_CN_WEB/VIVO_CN_WEB`）：
 
 ```bash
 # 不连接数据库：发现产品，抽样完整解析 SKU，并执行静态质量校验
@@ -137,7 +140,7 @@ LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel APPLE_CN_WEB
 
 正式采集每个产品一个事务，所有 SKU 共用一组 `PRODUCT` 证据，直接建立 `v2_catalog_item/item_variant/listing_match` 及价格事实。仅失败的产品回滚，其他成功产品保留；失败证据仍保存。重放旧时点不恢复生命周期或更新当前 URL，未知 SKU 状态不等于有货，Apple Watch 总价缺口仍按严格规则拒绝。
 
-命令输出包含 `status`：`SUCCEEDED` 才退出 0，`PARTIAL/FAILED` 退出 1，参数、真实开关或数据库来源配置门禁不通过退出 2。除来源日期外应检查 `accepted_count/review_count/rejected_count/failed_count`；不能只看失败请求数或新增行数。`catalog replay` 尚未实现，旧 `replay --record-id` 已停用。
+命令输出包含 `status`：`SUCCEEDED` 才退出 0，`PARTIAL/FAILED` 退出 1，参数、真实开关或数据库来源配置门禁不通过退出 2。除来源日期外应检查 `accepted_count/review_count/rejected_count/failed_count`；不能只看失败请求数或新增行数。V2 重放使用第 2.6 节的 `catalog replay`，不再提供旧顶层 `replay`。
 
 华为/小米依赖 Chromium，先执行 `make browser-install`。设备保护沿用 `.env.example` 中既有配置：价差阈值 30%、缺失确认 3 次、发现产品数量下限 50%、过期批次 120 分钟。无需增加配置或调度服务。
 
@@ -153,37 +156,61 @@ LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel APPLE_CN_WEB
 
 缺失仅在完整默认品类、非查询重采、非重放且新时点的发现与已发现产品采集全部成功时累计；后续缺失确认失败会使最终批次 PARTIAL，但不会伪造状态。已见产品恢复失败、解析失败、403、网络异常不恢复 ACTIVE、不清零缺失次数。政府来源不套用设备价差、下架或新增过期恢复规则。
 
+### 2.6 原始证据只读重放
+
+配置目标库只读访问和原采集的 `RAW_STORAGE_PATH`，将 `123` 替换为 `v2_crawl_record.id`：
+
+```bash
+uv run device-price catalog replay --record-id 123
+# 等效 Makefile 入口
+make catalog-replay RECORD_ID=123
+```
+
+不需要打开真实采集开关，不创建抓取器，不联网、不写库，也不创建不存在的证据目录。输出包含 `STATIC_REPLAY`、原始抓取时间、逐 SKU/政府行静态校验、原批次与记录的 `historical_validation` 和历史事实。静态结果用于核验当前解析规则，不代表重新认证历史状态或新的报价时点。
+
+新记录从不可变 manifest 恢复产品/文档及原请求范围，不读取后来变化的 listing 字段猜上下文；已部署的旧商务部/上海记录可根据已保存的来源页面、日期和白名单确定恢复。无法恢复、缺少文件、哈希不符或压缩损坏均退出 1；不补抓、不修改原证据。
+
+共享产品证据输出所有 SKU。待复核变价证据即使当前静态解析成功仍为 `PARTIAL`，退出 1；应查看同批第二条确认记录。已确认 404/410 只核对并展示原无价状态事实，不解析错误页面、不复制旧金额。`SUCCEEDED` 退出 0，其他重放结果退出 1，命令参数错误退出 2。
+
+### 2.7 可选的显式设备调度
+
+默认不启动。仅在已授权访问真实来源、来源已启用且目标库已确认时执行；`--channel` 必填且可重复：
+
+```bash
+LIVE_CRAWL_ENABLED=true uv run device-price scheduler \
+  --channel APPLE_CN_WEB --channel HUAWEI_CN_WEB
+# 等效入口
+LIVE_CRAWL_ENABLED=true make scheduler CHANNELS="APPLE_CN_WEB HUAWEI_CN_WEB"
+```
+
+启动前校验全部所选来源，拒绝空值、重复、未知、政府或禁用来源；不自动选全部来源。沿用 `FULL_CRAWL_INTERVAL_HOURS`（默认 6 小时），每来源一个不重叠任务，调用同一 V2 流水线，批次标记 `SCHEDULED`，进程间由原 MySQL 命名锁互斥。每次执行重新校验开关；中途禁用来源后不再抓取或建立新批次。
+
+这只是保留已有轻量调度能力，不启动额外服务、不调度政府、不新增监控。人工停止进程即可退出，不应同时启动多个用途相同的调度容器。
+
 ## 3. 数据保护规则
 
 - HTTP 层对网络错误、429 和可重试的 5xx 最多重试三次；
 - 单商品失败只记录失败证据，不覆盖现有价格；
 - 超过 `PRICE_CHANGE_CONFIRM_THRESHOLD` 的价格变化必须立即复抓，两个价格状态完全一致才写入；
 - 商品连续缺失 `MISSING_CONFIRMATION_RUNS` 次后必须访问详情页确认；只有详情返回 404/410，或详情成功解析出下架状态，才更新下架状态；
-- 发现数量低于 `DISCOVERY_COUNT_FLOOR_RATIO` 时批次标记异常并报警，但缺失商品仍须经过详情确认，不直接下架；
-- 乱序观测、当前价与开放历史不一致会使事务失败，不允许人工强行覆盖。
+- 设备发现数量低于 `DISCOVERY_COUNT_FLOOR_RATIO` 时明确失败、不写价、不累计缺失；不额外建设报警服务；
+- 旧时点可信观察可以保留历史，但不能回退当前规格或价格；同点冲突不以最后写入覆盖，不允许人工强行改当前指针。
 - 政府来源日期写入 `v2_price_observation.observed_at`，下载时间写入 `v2_crawl_record.fetched_at`；完整原文件哈希保存在抓取记录，价格观察使用行级证据哈希。同一价格行重采不新增事实，同日变价只为实际变化行形成可追溯修订链。
 - 政府 XLS/HTML 出现缺列、日期冲突、未知单位、市场 ID 异常、金额异常或损坏内容时，整份数据集不推进当前价，但保留失败证据和稳定错误码。
 
-## 4. 巡检与报警
+## 4. 手工 V2 审计
 
 ```bash
 uv run device-price db audit
+# 可选：同时读取原始证据文件并验证内容哈希
+uv run device-price db audit --check-artifacts
 ```
 
-该命令只执行 `SELECT`。输出为 JSON；关键一致性检查非零时退出码为 1。demo 验收时手工执行即可；若未来生产化，再由现有运维平台决定执行频率和报警接入。
+该命令仅查询 V2 表并读取 schema 元数据，不修复、不写库、不联网。默认只检查数据库关联和证据清单；显式 `--check-artifacts` 才读取证据文件并校验哈希、大小和压缩完整性。JSON 分 `critical` 和 `warnings`，存在 critical 时退出 1；只有 warning 时仍退出 0。缺少必需表会明确报错，V1 表存在或不存在均不影响审计。
 
-`db audit` 仍以 V1 运行指标为主。V2 手工采集必须核对命令退出码、来源日期、`v2_crawl_run` 计数以及 `v2_crawl_record.error_code`；当前不建设 V2 停更或记录数骤降报警，不能把 V1 audit 通过当成 V2 来源健康。
+关键项包括当前指针与最新可信观察/规格一致、事实与 listing/来源/地区/证据关联、政府同日修订链、设备同点冲突、可信设备匹配与身份、价格/无价状态门禁、批次终态和证据完整性。变价复抓首条待确认记录可保留在最终成功批次中，不误判为整批未完成。
 
-关键项包括：
-
-- 当前价与唯一开放历史的基数和状态一致性；
-- 历史区间是否重叠；
-- 当前价能否追溯到成功采集证据；
-- 渠道是否仍为中国大陆、人民币、官方直营；
-- 是否存在超过阈值仍为 `RUNNING` 的批次；
-- 是否存在过期价格、待确认下架或最近被拒绝的大幅价格变化。
-
-在 `LIVE_CRAWL_ENABLED=true` 时，从未完成过有效批次的启用渠道也会作为关键故障。
+过期 RUNNING、过期当前价、已启用但未完成采集的来源、待确认缺失和未确认变价仅报告 warning；尚未运行的禁用来源不误报。warning 不会自动终结批次或清除价格。仍需结合采集退出码、来源日期、计数和 `v2_crawl_record.error_code` 判断覆盖与时效；审计通过不代表来源发布及时或型号全部覆盖。
 
 ## 5. 备份
 
@@ -213,7 +240,7 @@ mysqldump \
 1. 启动与生产大版本相同的空 MySQL；
 2. 导入最近备份；
 3. 执行 `device-price db check` 和 `device-price db audit`；
-4. 核对 Alembic 版本、部署范围对应的 10 或 23 张业务表、种子数量、触发器数量和关键表行数；
+4. 核对 Alembic 版本、13 张 V2 必需表（完整历史迁移共 23 张业务表）、种子数量、触发器数量和关键表行数；
 5. 使用 fixture 执行一次写入和重放；
 6. 删除临时实例，保存演练时间、恢复耗时、校验结果和备份哈希。
 
@@ -226,28 +253,28 @@ mysqldump \
 1. 运行 `db audit` 确认 `stale_running_crawl`；
 2. 检查同渠道容器和 MySQL 命名锁；
 3. 保存日志后重启单个调度进程；
-4. 下一批次会把超过 `CRAWL_STALE_AFTER_MINUTES` 的旧批次标为失败。
+4. 下一次设备采集只将同来源、地区、品类且超过 `CRAWL_STALE_AFTER_MINUTES` 的旧批次标为失败；政府批次不套用该恢复规则，审计本身不改状态。
 
 ### 大幅价格变化被拒绝
 
-1. 查询 `crawl_record.error_code='LARGE_PRICE_CHANGE_UNCONFIRMED'` 的两份证据；
+1. 查询同批产品 `v2_crawl_record` 的 `PRICE_CHANGE_CONFIRMATION_REQUIRED/PRICE_CHANGE_UNCONFIRMED` 及关联证据；
 2. 人工查看官方页面对应 SKU 总价；
 3. 若页面稳定变化，等待下一批再次双观测确认；
 4. 若解析规则错误，修复 adapter、增加脱敏 fixture 后发布；
-5. 不直接修改 `price_current`。
+5. 不直接修改 `v2_price_current`。
 
 ### 发现数量骤降
 
-1. 查看批次 `DISCOVERY_COUNT_GUARD`；
+1. 查看批次 `DISCOVERY_COUNT_BELOW_FLOOR`；
 2. 检查 403、429、验证码、页面结构和品类入口；
-3. 核对待确认 offer 的 `consecutive_misses`；
+3. 核对待确认 `v2_source_listing.consecutive_misses`；
 4. 只有详情确认后才接受下架；
 5. 修复后使用 fixture 重放，再恢复调度。
 
 ### 数据一致性报警
 
 1. 立即停止对应渠道调度，保留数据库和证据；
-2. 执行只读查询定位 offer、批次和历史记录；
+2. 执行只读查询定位来源 listing、批次和点时事实；
 3. 不手工删除历史或重建当前价；
 4. 从代码缺陷、失败迁移或越权人工操作中确定原因；
 5. 在隔离副本验证修复或恢复方案后再处理生产。

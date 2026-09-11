@@ -1,1 +1,1 @@
-"""Brand adapter contracts and registry."""
+"""Native catalog connectors and shared fetching contracts."""

@@ -10,10 +10,11 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Engine, func, inspect, select
+from schema_support import LEGACY_TABLE_NAMES, drop_test_tables, reflect_legacy_tables
+from sqlalchemy import Engine, func, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
-from device_price_service.cli import V1_TABLES, V2_TABLES
+from device_price_service.cli import V2_TABLES
 from device_price_service.crawlers.apple import AppleCatalogConnector
 from device_price_service.crawlers.base import AdapterContext
 from device_price_service.crawlers.shanghai_fresh import (
@@ -40,7 +41,6 @@ from device_price_service.db.catalog_models import (
 from device_price_service.db.catalog_repositories import CatalogPriceRepository
 from device_price_service.db.catalog_seed import seed_fresh_categories, seed_shanghai_fresh_source
 from device_price_service.db.device_seed import seed_device_catalog
-from device_price_service.db.seed import seed_reference_data
 from device_price_service.db.session import create_session_factory
 from device_price_service.domain.catalog_crawl import (
     CatalogCollectionRequest,
@@ -130,11 +130,11 @@ def _count(session: Session, model: type) -> int:
 
 @pytest.fixture()
 def v2_only_factory(mysql_engine: Engine) -> Iterator[sessionmaker[Session]]:
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
     tables = [Base.metadata.tables[name] for name in sorted(V2_TABLES)]
     Base.metadata.create_all(mysql_engine, tables=tables)
     try:
-        assert V1_TABLES.isdisjoint(inspect(mysql_engine).get_table_names())
+        assert LEGACY_TABLE_NAMES.isdisjoint(inspect(mysql_engine).get_table_names())
         yield create_session_factory(mysql_engine)
     finally:
         Base.metadata.drop_all(mysql_engine, tables=tables)
@@ -155,7 +155,7 @@ def test_apple_product_multi_sku_has_one_shared_evidence_and_full_v2_catalog_cha
     assert outcome.accepted_count == 3
     assert outcome.failed_count == 0
     assert fetcher.calls == [PRODUCT.url]
-    assert V1_TABLES.isdisjoint(inspect(mysql_engine).get_table_names())
+    assert LEGACY_TABLE_NAMES.isdisjoint(inspect(mysql_engine).get_table_names())
     with v2_only_factory() as session:
         assert _count(session, CatalogItem) == _count(session, Merchant) == 1
         assert _count(session, ItemVariant) == _count(session, ListingRevision) == 3
@@ -235,7 +235,7 @@ def test_apple_macbook_fixture_preserves_computer_specifications_in_v2_only_cata
     assert outcome.discovered_count == outcome.fetched_count == outcome.accepted_count == 1
     assert outcome.failed_count == 0
     assert fetcher.calls == [product.url]
-    assert V1_TABLES.isdisjoint(inspect(mysql_engine).get_table_names())
+    assert LEGACY_TABLE_NAMES.isdisjoint(inspect(mysql_engine).get_table_names())
     with v2_only_factory() as session:
         price, variant, category, brand, sku, evidence = session.execute(
             select(
@@ -577,7 +577,9 @@ def test_apple_collection_preserves_existing_v1_and_government_rows(
 ) -> None:
     factory = migrated_session_factory
     with factory.begin() as session:
-        seed_reference_data(session)
+        session.execute(
+            text("INSERT INTO brand (code, name_zh, name_en) VALUES ('KEEP', '保留', 'Keep')")
+        )
         seed_fresh_categories(session)
         seed_shanghai_fresh_source(session, enable=True)
 
@@ -617,10 +619,11 @@ def test_apple_collection_preserves_existing_v1_and_government_rows(
     assert outcome.accepted_count == 8
 
     # Retain the exact full rows, not merely global counts in shared V2 tables.
+    tables = {**Base.metadata.tables, **reflect_legacy_tables(mysql_engine).tables}
     with factory() as session:
         before = {
             table.name: session.execute(select(table).order_by(*table.primary_key)).mappings().all()
-            for table in Base.metadata.sorted_tables
+            for table in tables.values()
         }
     _seed(factory)
     pipeline = _pipeline(
@@ -630,8 +633,8 @@ def test_apple_collection_preserves_existing_v1_and_government_rows(
 
     with factory() as session:
         for name, original_rows in before.items():
-            table = Base.metadata.tables[name]
-            if name in V1_TABLES:
+            table = tables[name]
+            if name in LEGACY_TABLE_NAMES:
                 assert (
                     session.execute(select(table).order_by(*table.primary_key)).mappings().all()
                     == original_rows

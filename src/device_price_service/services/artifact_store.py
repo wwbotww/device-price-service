@@ -4,6 +4,7 @@ import gzip
 import os
 import re
 import tempfile
+import zlib
 from hashlib import sha256
 from pathlib import Path
 
@@ -23,7 +24,6 @@ class RawArtifactStore:
 
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
 
     def save(
         self,
@@ -67,8 +67,11 @@ class RawArtifactStore:
             raise ArtifactError("artifact path escapes the configured storage root")
         if not candidate.is_file():
             raise ArtifactError(f"artifact does not exist: {relative_path}")
-        with gzip.open(candidate, "rb") as archive:
-            body = archive.read()
+        try:
+            with gzip.open(candidate, "rb") as archive:
+                body = archive.read()
+        except (gzip.BadGzipFile, EOFError, zlib.error) as exc:
+            raise ArtifactIntegrityError(f"artifact gzip is corrupt: {relative_path}") from exc
         actual_hash = sha256(body).hexdigest()
         if expected_hash is not None and actual_hash != expected_hash.lower():
             raise ArtifactIntegrityError(

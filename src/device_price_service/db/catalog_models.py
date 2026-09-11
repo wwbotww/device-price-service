@@ -21,7 +21,7 @@ from sqlalchemy.dialects import mysql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from device_price_service.db.base import Base
-from device_price_service.db.models import created_at_column, updated_at_column
+from device_price_service.db.columns import created_at_column, updated_at_column
 from device_price_service.domain.catalog_enums import (
     AccessMode,
     Availability,

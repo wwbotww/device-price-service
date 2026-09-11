@@ -374,14 +374,13 @@ def test_catalog_crawl_configuration_gate_exits_two_and_closes_runtime(
 
 
 @pytest.mark.parametrize("command", ["crawl", "smoke"])
-def test_migrated_brand_legacy_command_explains_v2_entrypoint(
+def test_migrated_brand_legacy_command_is_removed(
     offline_cli: FixtureProductConnector,
     command: str,
 ) -> None:
     result = CliRunner().invoke(cli.app, [command, "--brand", "APPLE"])
     assert result.exit_code == 2
-    assert "now uses V2" in result.stderr
-    assert "APPLE_CN_WEB" in result.stderr
+    assert "No such command" in result.stderr
 
 
 @pytest.mark.parametrize("status_code", [200, 403])

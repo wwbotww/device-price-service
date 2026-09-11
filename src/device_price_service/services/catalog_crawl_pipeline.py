@@ -61,7 +61,7 @@ from device_price_service.domain.catalog_enums import (
 )
 from device_price_service.domain.catalog_models import CatalogPriceObservation
 from device_price_service.domain.crawl import ArtifactReference, FetchResult
-from device_price_service.domain.models import utc_now_naive
+from device_price_service.domain.time import utc_now_naive
 from device_price_service.fetchers.url_policy import UrlPolicy
 from device_price_service.normalization.catalog_rules import CategoryRule, CategoryRuleRegistry
 from device_price_service.normalization.devices import device_item_key
@@ -182,7 +182,7 @@ class CatalogCrawlPipeline:
             f"{request.region_scope.value}:{request.region_code}"
         )
         with mysql_named_lock(self.engine, lock_name):
-            channel = self._load_channel(connector)
+            channel = self.validate_source(connector)
             context = AdapterContext(
                 http=self.http_fetcher,
                 browser=self.browser_fetcher,
@@ -1031,7 +1031,8 @@ class CatalogCrawlPipeline:
             else f"PUBLIC_PRICE:{sha256(unit.dataset_key.encode()).hexdigest()}"
         )
 
-    def _load_channel(self, connector: Connector) -> _ChannelRuntime:
+    def validate_source(self, connector: Connector) -> _ChannelRuntime:
+        """Check enabled source settings for collection or scheduler preflight, without fetching."""
         with self.session_factory() as session:
             channel = session.scalar(
                 select(SourceChannel).where(

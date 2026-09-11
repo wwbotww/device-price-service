@@ -92,6 +92,7 @@ def test_explicit_average_natures_are_current_eligible(price_nature: PriceNature
         ({"region_scope": RegionScope.UNKNOWN}, "known region"),
         ({"pricing_basis": PricingBasis.VARIABLE_ESTIMATE}, "exact pricing_basis"),
         ({"current_price": Decimal("0")}, "greater than zero"),
+        ({"original_price": Decimal("0")}, "greater than zero"),
         ({"unit_price_unit": None}, "both be null or non-null"),
     ],
 )

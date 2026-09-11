@@ -7,13 +7,14 @@ from decimal import Decimal
 import pytest
 from alembic import command
 from alembic.config import Config
+from schema_support import LEGACY_TABLE_NAMES, drop_test_tables
 from sqlalchemy import Engine, func, inspect, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session, sessionmaker
 from typer.testing import CliRunner
 
 import device_price_service.cli as cli
-from device_price_service.cli import V1_TABLES, V2_TABLES
+from device_price_service.cli import V2_TABLES
 from device_price_service.db.base import Base
 from device_price_service.db.catalog_models import (
     CatalogBrand,
@@ -239,12 +240,12 @@ def test_device_seed_and_catalog_chain_work_with_no_v1_tables(
     mysql_engine: Engine,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    Base.metadata.drop_all(mysql_engine)
+    drop_test_tables(mysql_engine)
     tables = [Base.metadata.tables[name] for name in sorted(V2_TABLES)]
     Base.metadata.create_all(mysql_engine, tables=tables)
     factory = create_session_factory(mysql_engine)
     try:
-        assert V1_TABLES.isdisjoint(inspect(mysql_engine).get_table_names())
+        assert LEGACY_TABLE_NAMES.isdisjoint(inspect(mysql_engine).get_table_names())
         monkeypatch.setattr(cli, "create_database_engine", lambda: mysql_engine)
         result = CliRunner().invoke(cli.app, ["db", "seed-devices"])
         assert result.exit_code == 0, result.output
@@ -405,7 +406,7 @@ def test_incremental_migration_preserves_existing_prices_references_and_v1_rows(
         with mysql_engine.connect() as connection:
             return {
                 name: connection.execute(text(f"SELECT * FROM `{name}` ORDER BY id")).all()
-                for name in sorted(V1_TABLES | V2_TABLES)
+                for name in sorted(LEGACY_TABLE_NAMES | V2_TABLES)
             }
 
     before = contents()

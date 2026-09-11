@@ -1,3 +1,4 @@
+import gzip
 from datetime import datetime
 from pathlib import Path
 
@@ -5,7 +6,11 @@ import pytest
 
 from device_price_service.domain.crawl import FetchResult
 from device_price_service.domain.enums import FetchMethod
-from device_price_service.services.artifact_store import ArtifactError, RawArtifactStore
+from device_price_service.services.artifact_store import (
+    ArtifactError,
+    ArtifactIntegrityError,
+    RawArtifactStore,
+)
 
 
 def _result(body: bytes = b"<html>price</html>") -> FetchResult:
@@ -34,6 +39,21 @@ def test_artifact_store_blocks_path_traversal(tmp_path: Path) -> None:
     store = RawArtifactStore(tmp_path / "raw")
     with pytest.raises(ArtifactError, match="escapes"):
         store.load("../../secret")
+
+
+def test_read_only_artifact_access_does_not_create_storage_directories(tmp_path: Path) -> None:
+    root = tmp_path / "not-created"
+    store = RawArtifactStore(root)
+    with pytest.raises(ArtifactError, match="does not exist"):
+        store.load("missing.html.gz")
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("body", [b"not gzip", gzip.compress(b"evidence")[:-5]])
+def test_corrupt_compressed_evidence_reports_integrity_error(tmp_path: Path, body: bytes) -> None:
+    (tmp_path / "corrupt.gz").write_bytes(body)
+    with pytest.raises(ArtifactIntegrityError, match="gzip is corrupt"):
+        RawArtifactStore(tmp_path).load("corrupt.gz")
 
 
 def test_artifact_store_preserves_xls_evidence_type(tmp_path: Path) -> None:

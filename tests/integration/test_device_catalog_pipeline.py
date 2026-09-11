@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
+from schema_support import reflect_legacy_tables
 from sqlalchemy import Engine, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -29,7 +30,6 @@ from device_price_service.db.catalog_models import (
     SourceListing,
 )
 from device_price_service.db.device_seed import seed_device_catalog
-from device_price_service.db.models import PriceCurrent, PriceHistory, Product, Sku
 from device_price_service.domain.catalog_crawl import (
     CatalogCollectionRequest,
     DiscoveredCatalogProduct,
@@ -173,8 +173,8 @@ def test_native_brand_fixture_is_idempotent_replayable_and_preserves_v2_catalog_
             CatalogPriceObservationRecord,
         ):
             assert session.scalar(select(func.count()).select_from(model)) == sku_count
-        for model in (Product, Sku, PriceCurrent, PriceHistory):
-            assert session.scalar(select(func.count()).select_from(model)) == 0
+        for table in reflect_legacy_tables(mysql_engine).tables.values():
+            assert session.scalar(select(func.count()).select_from(table)) == 0
         assert (
             session.scalar(
                 select(CatalogBrand.code).join(CatalogItem, CatalogItem.brand_id == CatalogBrand.id)

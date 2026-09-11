@@ -5,14 +5,6 @@ class StringEnum(StrEnum):
     pass
 
 
-class BrandCode(StringEnum):
-    APPLE = "APPLE"
-    HUAWEI = "HUAWEI"
-    XIAOMI = "XIAOMI"
-    OPPO = "OPPO"
-    VIVO = "VIVO"
-
-
 class LifecycleStatus(StringEnum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
@@ -43,24 +35,12 @@ class RunType(StringEnum):
     REPLAY = "REPLAY"
 
 
-class TriggerType(StringEnum):
-    SCHEDULED = "SCHEDULED"
-    MANUAL = "MANUAL"
-
-
 class RunStatus(StringEnum):
     RUNNING = "RUNNING"
     SUCCEEDED = "SUCCEEDED"
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
-
-
-class EntityType(StringEnum):
-    CATEGORY = "CATEGORY"
-    PRODUCT = "PRODUCT"
-    SKU = "SKU"
-    OFFER = "OFFER"
 
 
 class FetchMethod(StringEnum):

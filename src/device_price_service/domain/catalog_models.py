@@ -16,7 +16,7 @@ from device_price_service.domain.catalog_enums import (
     QualityStatus,
     RegionScope,
 )
-from device_price_service.domain.models import utc_now_naive
+from device_price_service.domain.time import utc_now_naive
 
 
 def _decimal_token(value: Decimal | None) -> str:

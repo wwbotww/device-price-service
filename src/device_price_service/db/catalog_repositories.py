@@ -26,7 +26,7 @@ from device_price_service.db.catalog_models import (
     SourceListing,
     TaxonomyCategory,
 )
-from device_price_service.db.repositories import RepositoryError
+from device_price_service.db.errors import RepositoryError
 from device_price_service.domain.catalog_enums import (
     AccessMode,
     BusinessMode,

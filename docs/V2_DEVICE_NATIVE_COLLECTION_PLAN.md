@@ -1,6 +1,6 @@
 # V2 设备原生采集接入：现状分析与改造计划
 
-> 状态：2026-09-11 审核修订确认；阶段 I～K 已完成，L～M 待实施
+> 状态：2026-09-11；阶段 I～L 已完成，M 真实验收待实施
 > 基线：2026-09-10 仓库代码、测试和最近一次真实采集验收记录
 > 目标：五品牌从官方来源直接采入 V2；不读取、搬运或迁移 V1 业务数据
 > 数据库：保留 13 张 V2 业务表与现有物理前缀，兼容 MySQL 5.7.36 / 8.x
@@ -34,14 +34,14 @@
 | 工具 | `replay`、`db audit`、scheduler 均绑定 V1 | 缺通用 V2 重放命令和 V2 数据审计；现有政府 smoke 主要验证解析，未完整复用入库前质量校验 |
 | 数据库检查 | — | `db check` 仍要求 V1 10 表与 V2 13 表同时存在 |
 
-定位入口：
+历史问题定位（链接指向当前实现，以下问题已随 I～L 改造消除）：
 
 - [runtime.py](../src/device_price_service/runtime.py)、[cli.py](../src/device_price_service/cli.py)：两套入口及硬编码的政府请求范围。
 - [连接器契约](../src/device_price_service/crawlers/catalog.py)、[V2 流水线](../src/device_price_service/services/catalog_crawl_pipeline.py)：单 listing 与数据集两条路径，以及重复的行准备/入库逻辑。
 - [V2 Repository](../src/device_price_service/db/catalog_repositories.py)：已有 item、variant、match 和价格操作。
-- [V1 流水线](../src/device_price_service/services/crawl_pipeline.py)、[V1 Repository](../src/device_price_service/db/repositories.py)：需接续的运行保护与下架处理。
+- 原 V1 `services/crawl_pipeline.py`、`db/repositories.py` 的保护能力已接入 V2；这两个旧模块已于 L 删除，不保留兼容包装层。
 
-此外，V2 模型仍从 V1 模型模块导入时间列工具，V2 Repository 从 V1 Repository 导入异常基类。彻底解耦时需移出这些公共定义，不能只替换 CLI 名称。
+当时 V2 模型从 V1 模型模块导入时间列工具，V2 Repository 从 V1 Repository 导入异常基类。阶段 L 已移至独立的 `domain/time.py`、`db/columns.py` 与 `db/errors.py`；业务运行时只注册 13 张 V2 表。
 
 ### 2.2 数据与测试基线
 
@@ -65,7 +65,7 @@ V2 现有 1,362 条政府价格；品牌、标准商品、规格和匹配表为�
 
 ## 3. 路线选择
 
-阶段 K 已完成：五品牌统一原生 V2；价格突变按整产品复抓，完整范围缺失累计及详情确认、SKU 遗漏降级、过期设备批次恢复均已接入。旧品牌采集、旧 replay/scheduler 的 CLI 执行路径已删除，完整 V2 工具与通用 V1 业务清理留在 L。实际边界及验证见[阶段 K 报告](V2_PHASE_K_BUILD_REPORT.md)。第 2 节保留改造前和各阶段的历史状态，不代表当前仍能执行旧四品牌入口。
+阶段 K 已完成：五品牌统一原生 V2；价格突变按整产品复抓，完整范围缺失累计及详情确认、SKU 遗漏降级、过期设备批次恢复均已接入。阶段 L 已完成只读 V2 replay/audit/check、显式设备调度与通用 V1 业务删除；实际边界及验证见[阶段 K 报告](V2_PHASE_K_BUILD_REPORT.md)和[阶段 L 报告](V2_PHASE_L_BUILD_REPORT.md)。第 2 节保留改造前和各阶段的历史状态，不代表当前仍能执行旧入口。
 
 | 路线 | 工作量与问题 | 结论 |
 | --- | --- | --- |
@@ -192,7 +192,7 @@ V2 现有 1,362 条政府价格；品牌、标准商品、规格和匹配表为�
 
 ## 7. 命令、重放与旧代码退出
 
-`db seed-devices`、五品牌的 `catalog smoke/crawl` 已实现；`catalog replay` 和统一 V2 audit 待阶段 L。旧采集、重放及 scheduler 命令直接拒绝，不再构建 V1 运行时。真实采集必须遵守门禁，阶段 I～K 未访问真实来源或公司库：
+以下命令均已实现。旧顶层 `adapters/crawl/smoke/replay` 与 `db seed` 已删除；scheduler 改为显式选择设备来源并调用 V2，不再构建 V1 运行时。真实采集必须遵守门禁，阶段 I～L 未访问真实来源或公司库：
 
 ```bash
 # 初始化 V2 设备品牌/分类/渠道；默认不启用真实来源
@@ -202,14 +202,18 @@ uv run device-price db seed-devices --enable
 uv run device-price catalog sources
 LIVE_CRAWL_ENABLED=true uv run device-price catalog smoke --channel APPLE_CN_WEB --max-products 1
 LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel APPLE_CN_WEB
-# 以下为阶段 L 目标，当前不可作为 V2 验收命令
-# uv run device-price catalog replay --record-id <V2抓取记录ID>
-# uv run device-price db audit
+# 只读工具；123 替换为目标库的 V2 抓取记录 ID
+uv run device-price catalog replay --record-id 123
+uv run device-price db check
+uv run device-price db audit --check-artifacts
+# 可选，不默认启动；必须选择已经启用的设备来源
+LIVE_CRAWL_ENABLED=true uv run device-price scheduler --channel APPLE_CN_WEB
 ```
 
 - 沿用 `catalog` 作为唯一采集入口；政府现有 `--commodity` 语义保留。渠道默认范围由对应连接器/来源配置提供，不继续向 CLI 堆品牌分支。
 - smoke 不连数据库，使用种子定义的来源/品类配置，但与正式采集共用解析、规格和静态价格门禁；需要旧价格的变价复核属于正式采集阶段。
 - V2 replay 默认只读、不联网、不写价格；使用 V2 record 的原始时间和产品/文档上下文，能重放共享证据中的全部 SKU/价格行。重放输出不等于重新采集时点。
+- replay 输出 `STATIC_REPLAY`、原始时间、逐行静态结果和独立 `historical_validation`。第一次变价待复核证据仍报告 `PARTIAL`，不因当前静态解析通过而升级可信；已确认 404/410 只展示原状态事实，不解析错误页或复制旧价。证据缺失、损坏或无法恢复上下文时明确失败，不补抓、不修复。
 - 新产品记录必须保留重放所需的产品 ID、分类、品牌/来源、规格上下文和每份证据的请求 URL、时间、哈希及相对路径。不得从后来变化的 listing 当前字段重新猜测原产品。已有政府记录按已保存的来源 URL、日期与白名单恢复确定性上下文；无法恢复时明确报缺证据，不补抓、不改历史记录。
 - `db audit` 转为 V2：核对当前指针、观察、版本、匹配唯一性、证据、无价状态语义和批次终态；未运行的禁用来源不误报。原始文件检查和过期信息保留为手工验收能力，不建设告警平台。
 - `db check` 只要求 V2 必需表；已知 V1 历史表可存在，但缺少 V1 表不能阻止运行。
@@ -217,18 +221,18 @@ LIVE_CRAWL_ENABLED=true uv run device-price catalog crawl --channel APPLE_CN_WEB
 - 删除被替代的 V1 `CrawlPipeline`、价格持久化业务、运行注册表和 V1 专用 DTO/校验调用；重放和审计改造原有实现，避免多套同功能服务并存。
 - 公共抓取对象、时间工具和异常基类移出 V1 业务依赖。同步 Makefile、测试、Docker 命令示例、README、运行手册、连接器契约与项目定位说明。
 
-V1 物理表及其数据本轮默认保留为静态 demo，不再写入；删表不是 V2 接入前置条件，需另行确认。历史 Alembic 链保留，迁移元数据如需描述旧表可在迁移侧保留，但业务运行时不能依赖它。应防止后续自动生成迁移时误删这些旧表，不增加 V1 查询兼容层。
+V1 物理表及其数据本轮默认保留为静态 demo，不再写入；删表不是 V2 接入前置条件，需另行确认。历史 Alembic 链保持原样，完整升级仍创建 23 张业务表；运行时只需要 13 张 V2 表。自动生成迁移只反射 `v2_` 表，排除旧表和其他业务表，不增加 V1 查询兼容层或删表迁移。MySQL 5.7 实际约束仍须由 Alembic 安装，不把 `metadata.create_all` 当部署替代。
 
 ## 8. 分阶段实施与验收
 
-继续现有 A～H 编号。阶段 I～K 已完成，L～M 待实施；每阶段完成后以构建报告列出实际验证范围。
+继续现有 A～H 编号。阶段 I～L 已完成，M 待实施；每阶段完成后以构建报告列出实际验证范围。
 
 | 阶段 | 工作范围 | 验收出口 |
 | --- | --- | --- |
 | I：契约与数据语义（已完成） | 产品级多 SKU DTO、设备分类/来源种子、规格与标准匹配规则、状态事实和 PRODUCT 枚举迁移 | 身份和费用映射明确；新旧政府记录通过 5.7/8.x 约束；V2-only 种子和标准建档测试不访问 V1 |
 | J：单品牌贯通（已完成） | Apple 手机/电脑 fixture，原生产品输出；共用 V2 行准备和入库，接齐 item/variant/match 及静态 smoke | 单产品多 SKU 直接落 V2；同证据幂等/乱序和失败回滚通过；政府 fixture 回归不退化；完整 replay 命令仍在 L |
 | K：五品牌与运行保护（已完成） | 接入华为、小米、OPPO、vivo，迁入变价复核、缺失确认、范围与批次保护 | 五品牌设备 fixture 与异常场景通过；没有为每个 SKU 重复抓完整产品；证据粒度不足时不推断下架 |
-| L：统一运行与退出 V1 | CLI、完整 smoke、V2 replay/audit、可选简单调度、Makefile/镜像入口；删除旧业务实现和隐性依赖 | 只有 13 张 V2 表的专用测试库可跑完整链路；不存在可执行的 V1 写库入口 |
+| L：统一运行与退出 V1（已完成） | CLI、完整 smoke、只读 V2 replay/audit/check、显式设备调度、Makefile/镜像入口；删除旧业务实现和隐性依赖 | 只有 13 张 V2 表的专用测试库可跑完整链路；历史表共存不访问；不存在可执行的 V1 写库入口 |
 | M：真实验收 | 双版本测试、镜像 smoke，官方来源只读 smoke；随后在公司库追加直接采集的 V2 设备数据 | 新价格和标准商品链路可信；五品牌覆盖差异可解释；原政府数据、V1 静态数据与其他 schema 不受影响 |
 
 阶段 M 前，只在专用 `device_price_test` 环境进行会建表/删表的集成测试。公司库操作时先检查并备份，只执行已验证的增量迁移、V2 设备种子和真实采集；不清库，不从 V1 表导出导入。
