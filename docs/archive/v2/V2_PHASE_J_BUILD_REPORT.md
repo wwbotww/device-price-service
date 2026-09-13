@@ -1,5 +1,7 @@
 # V2 设备原生采集：阶段 J 构建报告
 
+> 历史归档：本文件保留当时的方案、结果和限制，不作为当前操作指南；其中旧命令、待办或授权不可直接沿用。当前入口见[文档导航](../../README.md)与[项目状态](../../PROJECT_STATUS.md)。
+
 > 日期：2026-09-11
 > 分支：`codex/device-v2-native-collection`
 > 范围：Apple 单品牌原生 V2、共用管道及静态入口；K～M 待实施
@@ -66,4 +68,4 @@ docker run --rm --network none device-price-service:device-v2-apple adapters
 
 阶段 M 在本地验收完备后再做受控真实 smoke、公司库增量迁移和原生重采。本阶段不保证当前真实官网结构仍与 fixture 一致，未解决的 Apple Watch 组合总价问题继续保留；不得为通过验收放宽直接售价或证据规则。
 
-实施依据见[改造计划](V2_DEVICE_NATIVE_COLLECTION_PLAN.md)，命令前置条件见[运行手册](OPERATIONS_RUNBOOK.md#25-五品牌原生-v2-入口阶段-jk)。
+实施依据见[改造计划](V2_DEVICE_NATIVE_COLLECTION_PLAN.md)，命令前置条件见[运行手册](../../OPERATIONS_RUNBOOK.md#2-手工采集)。

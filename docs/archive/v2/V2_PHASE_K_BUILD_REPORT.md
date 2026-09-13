@@ -1,5 +1,7 @@
 # V2 设备原生采集：阶段 K 构建报告
 
+> 历史归档：本文件保留当时的方案、结果和限制，不作为当前操作指南；其中旧命令、待办或授权不可直接沿用。当前入口见[文档导航](../../README.md)与[项目状态](../../PROJECT_STATUS.md)。
+
 > 日期：2026-09-11
 > 分支：`codex/device-v2-native-collection`
 > 范围：五品牌原生 V2 与设备运行保护；完整工具退出 V1 在 L，真实验收在 M
@@ -31,7 +33,7 @@ OPPO/vivo 的成功复合证据包含每次原始响应正文、请求/最终 UR
 - 旧点时、重复证据、条件价、失败解析不恢复当前 URL/生命周期或清零缺失。比较统一使用 UTC 毫秒，与 MySQL 事实精度一致；既有同时点冲突、乱序、版本切换及重建保护继续生效。
 - 渠道/地区命名锁内恢复同渠道、地区、品类范围过期的设备 RUNNING；其他范围及政府 commodity 不受影响。取消得到 CANCELLED 终态。未增加调度或监控系统。
 
-实现集中在 [设备保护](../src/device_price_service/services/catalog_device_guards.py) 与 [共用流水线](../src/device_price_service/services/catalog_crawl_pipeline.py)，不引入品牌专属持久化分支。
+实现集中在 [设备保护](../../../src/device_price_service/services/catalog_device_guards.py) 与 [共用流水线](../../../src/device_price_service/services/catalog_crawl_pipeline.py)，不引入品牌专属持久化分支。
 
 ## 3. 入口与数据库边界
 
@@ -41,7 +43,7 @@ OPPO/vivo 的成功复合证据包含每次原始响应正文、请求/最终 UR
 - 沿用既有四项运行保护配置，`.env.example` 无需新增变量。不新增业务表或迁移；代码 head 仍为 `b72c910e4f31`。
 - 本轮仅使用本地专用 `device_price_test`，没有连接公司库、访问真实来源、迁移 V1 数据、提交或推送 Git。公司最近确认的 head 仍为 `96524222b3ec`。
 
-具体命令及错误处理见[运行手册](OPERATIONS_RUNBOOK.md#25-五品牌原生-v2-入口阶段-jk)。
+具体命令及错误处理见[运行手册](../../OPERATIONS_RUNBOOK.md#2-手工采集)。
 
 ## 4. 验证
 
@@ -51,9 +53,9 @@ OPPO/vivo 的成功复合证据包含每次原始响应正文、请求/最终 UR
 
 关键测试入口：
 
-- [五品牌共用运行保护](../tests/integration/test_catalog_device_guards.py)：复抓一致/不一致、规格/状态变化、原价基线、整产品缺失、无价下架及恢复、重建、错误响应、局部/重放/旧点时、遗漏 SKU、过期范围和取消。
-- [四品牌 V2 集成](../tests/integration/test_device_catalog_pipeline.py)：替换原 `test_phase3_brand_pipeline.py/test_phase4_brand_pipeline.py`，核验标准商品链路、具体原价/现价、共享证据、幂等、新时点、条件价拒绝、V1 不写入。
-- [Apple 集成](../tests/integration/test_apple_catalog_pipeline.py)：V2-only 13 表及 V1/政府共存隔离、整产品回滚、乱序、同时间冲突、规格变化等既有用例。
+- [五品牌共用运行保护](../../../tests/integration/test_catalog_device_guards.py)：复抓一致/不一致、规格/状态变化、原价基线、整产品缺失、无价下架及恢复、重建、错误响应、局部/重放/旧点时、遗漏 SKU、过期范围和取消。
+- [四品牌 V2 集成](../../../tests/integration/test_device_catalog_pipeline.py)：替换原 `test_phase3_brand_pipeline.py/test_phase4_brand_pipeline.py`，核验标准商品链路、具体原价/现价、共享证据、幂等、新时点、条件价拒绝、V1 不写入。
+- [Apple 集成](../../../tests/integration/test_apple_catalog_pipeline.py)：V2-only 13 表及 V1/政府共存隔离、整产品回滚、乱序、同时间冲突、规格变化等既有用例。
 - 四品牌单位测试覆盖 URL/身份/维度/重复 SKU/完整性/状态与原始证据；浏览器模拟测试覆盖错误页和正常路径，未访问真实站点。
 
 ## 5. 下一阶段与限制

@@ -1,5 +1,7 @@
 # V2 阶段 H 公司库验收报告：商务部品种扩展与全量重建
 
+> 历史归档：本文件保留当时的方案、结果和限制，不作为当前操作指南；其中旧命令、待办或授权不可直接沿用。当前入口见[文档导航](../../README.md)与[项目状态](../../PROJECT_STATUS.md)。
+
 > 完成日期：2026-08-25
 > 目标库：公司 MySQL 5.7.36 的 `device_price`
 > 状态：备份、重建、真实采集、幂等与隔离性验收全部通过
@@ -137,4 +139,4 @@ docker run --rm device-price-service:phase-h catalog sources
 - 当前不提供对话查询 API、理赔规则或自动推荐价；
 - 暂用 root 账号是当前部署决定，后续若转为正式运行，应改为只授权 `device_price.*` 的专用账号。
 
-手工更新和故障处置见 [运行与故障处理手册](OPERATIONS_RUNBOOK.md)。
+手工更新和故障处置见 [运行与故障处理手册](../../OPERATIONS_RUNBOOK.md)。

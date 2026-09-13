@@ -3,7 +3,7 @@
 ## 项目定位与信息源
 
 - 本仓库负责价格数据的采集、规范化、校验、审计与 MySQL 持久化；V1 设备商城是历史 demo，V2 面向政府生鲜与官方电子设备，同时保留全品类通用表结构。接入状态以开发文档和代码为准。
-- `README.md` 是开发入口，`docs/V2_GENERAL_CATALOG_DEVELOPMENT_PLAN.md` 是当前范围和实施基准，`docs/PROJECT_IMPLEMENTATION_PLAN.md` 只保留 V1 历史口径；代码和测试代表当前实现状态。
+- `README.md` 和 `docs/README.md` 是入口，`docs/V2_GENERAL_CATALOG_DEVELOPMENT_PLAN.md` 是当前范围与开发基准，`docs/PROJECT_STATUS.md` 集中维护验收与遗留项；`docs/archive/` 仅作历史追溯，代码和测试代表当前实现状态。
 - 若需求改变业务范围、价格口径、数据库结构或运行方式，应同步更新相应文档，不要只在代码中形成隐含规则。
 
 ## 结构与可读性

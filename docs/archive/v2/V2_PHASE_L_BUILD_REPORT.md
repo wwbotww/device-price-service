@@ -1,5 +1,7 @@
 # V2 设备原生采集：阶段 L 构建报告
 
+> 历史归档：本文件保留当时的方案、结果和限制，不作为当前操作指南；其中旧命令、待办或授权不可直接沿用。当前入口见[文档导航](../../README.md)与[项目状态](../../PROJECT_STATUS.md)。
+
 > 日期：2026-09-11
 > 分支：`codex/device-v2-native-collection`
 > 范围：统一 V2 运行、只读重放/审计与旧业务退出；真实商城及公司部署验收仍在 M
@@ -27,7 +29,7 @@
 - 审计覆盖当前指针、最新可信规格/观察、政府修订、设备同点冲突、标准身份与匹配、证据归属、价格/无价状态门禁和批次终态。变价复抓的第一条 PENDING 证据可合法保留，不使最终成功批次误报。
 - 缺少必需表或数据不一致计入 `critical`；过期批次/价格、启用但未采集的来源和未确认变化仅计入 `warnings`，禁用且未运行的来源不误报。审计不自动终结批次、重建指针或修改数据。
 
-`catalog replay` 全部静态通过退出 0，失败或部分通过退出 1；命令参数错误退出 2。审计存在 critical 才退出 1，warning 不影响退出码。操作与错误处理见[运行手册](OPERATIONS_RUNBOOK.md#26-原始证据只读重放)。
+`catalog replay` 全部静态通过退出 0，失败或部分通过退出 1；命令参数错误退出 2。审计存在 critical 才退出 1，warning 不影响退出码。操作与错误处理见[运行手册](../../OPERATIONS_RUNBOOK.md#3-只读验收)。
 
 ## 3. V1 退出与数据库边界
 
@@ -49,10 +51,10 @@
 
 关键验收入口：
 
-- [V2-only CLI 闭环](../tests/integration/test_catalog_runtime_cli.py)：设备种子、采集、重放、检查、文件审计及显式调度；只读工具前后全部 V2 行相同，仅查询 SQL；来源中途禁用后不新增请求或批次。
-- [只读重放集成](../tests/integration/test_catalog_replay_service.py)：五品牌完整 SKU、两政府新旧上下文、原时点、无写库、确认 404；单元测试补证据损坏、身份/来源冲突及未确认变价。
-- [V2 审计](../tests/integration/test_database_audit.py)：13 表独立、缺表、V1 共存不访问、价格/版本/匹配/证据损坏、政府同点修订、变价复抓、合法无价状态和过期 warning。
-- [运行时边界](../tests/unit/test_runtime_schema.py)与[迁移回归](../tests/integration/test_migration.py)：旧模块不可导入、共享工具不隐式注册业务表、自动生成不删除历史表、实际约束和升降级保护。
+- [V2-only CLI 闭环](../../../tests/integration/test_catalog_runtime_cli.py)：设备种子、采集、重放、检查、文件审计及显式调度；只读工具前后全部 V2 行相同，仅查询 SQL；来源中途禁用后不新增请求或批次。
+- [只读重放集成](../../../tests/integration/test_catalog_replay_service.py)：五品牌完整 SKU、两政府新旧上下文、原时点、无写库、确认 404；单元测试补证据损坏、身份/来源冲突及未确认变价。
+- [V2 审计](../../../tests/integration/test_database_audit.py)：13 表独立、缺表、V1 共存不访问、价格/版本/匹配/证据损坏、政府同点修订、变价复抓、合法无价状态和过期 warning。
+- [运行时边界](../../../tests/unit/test_runtime_schema.py)与[迁移回归](../../../tests/integration/test_migration.py)：旧模块不可导入、共享工具不隐式注册业务表、自动生成不删除历史表、实际约束和升降级保护。
 
 MySQL 5.7 曾正确拦截两个审计测试制造的非法当前指针；测试已改为从原观察变更构造不一致、并按依赖顺序刷新版本，未修改或关闭任何业务约束。全仓格式检查还发现 11 个存量文件已有格式差异，本轮没有顺带批量格式化；Ruff lint 与本轮新增/实质修改模块格式检查通过。
 

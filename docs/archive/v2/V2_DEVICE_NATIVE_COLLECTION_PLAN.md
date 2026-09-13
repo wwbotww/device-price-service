@@ -1,5 +1,7 @@
 # V2 设备原生采集接入：现状分析与改造计划
 
+> 历史归档：本文件保留当时的方案、结果和限制，不作为当前操作指南；其中旧命令、待办或授权不可直接沿用。当前入口见[文档导航](../../README.md)与[项目状态](../../PROJECT_STATUS.md)。
+
 > 状态：2026-09-11；阶段 I～L 已完成，M 因 6 组历史 iMac 重复身份未通过最终验收，待限定修复授权
 > 基线：2026-09-10 仓库代码、测试和最近一次真实采集验收记录
 > 目标：五品牌从官方来源直接采入 V2；不读取、搬运或迁移 V1 业务数据
@@ -36,16 +38,16 @@
 
 历史问题定位（链接指向当前实现，以下问题已随 I～L 改造消除）：
 
-- [runtime.py](../src/device_price_service/runtime.py)、[cli.py](../src/device_price_service/cli.py)：两套入口及硬编码的政府请求范围。
-- [连接器契约](../src/device_price_service/crawlers/catalog.py)、[V2 流水线](../src/device_price_service/services/catalog_crawl_pipeline.py)：单 listing 与数据集两条路径，以及重复的行准备/入库逻辑。
-- [V2 Repository](../src/device_price_service/db/catalog_repositories.py)：已有 item、variant、match 和价格操作。
+- [runtime.py](../../../src/device_price_service/runtime.py)、[cli.py](../../../src/device_price_service/cli.py)：两套入口及硬编码的政府请求范围。
+- [连接器契约](../../../src/device_price_service/crawlers/catalog.py)、[V2 流水线](../../../src/device_price_service/services/catalog_crawl_pipeline.py)：单 listing 与数据集两条路径，以及重复的行准备/入库逻辑。
+- [V2 Repository](../../../src/device_price_service/db/catalog_repositories.py)：已有 item、variant、match 和价格操作。
 - 原 V1 `services/crawl_pipeline.py`、`db/repositories.py` 的保护能力已接入 V2；这两个旧模块已于 L 删除，不保留兼容包装层。
 
 当时 V2 模型从 V1 模型模块导入时间列工具，V2 Repository 从 V1 Repository 导入异常基类。阶段 L 已移至独立的 `domain/time.py`、`db/columns.py` 与 `db/errors.py`；业务运行时只注册 13 张 V2 表。
 
 ### 2.2 数据与测试基线
 
-最近一次验收为 V1 的 103 个产品、1,114 个 SKU 价格、84 条明确原价，四品牌发现列表全成功，Apple 三个 Watch 组合页失败；详见[V1 重采记录](V1_RECOLLECTION_20260910_REPORT.md)。这些数量只作回归参照，不能作为下一次实时采集的固定数量要求。
+最近一次验收为 V1 的 103 个产品、1,114 个 SKU 价格、84 条明确原价，四品牌发现列表全成功，Apple 三个 Watch 组合页失败；详见[V1 重采记录](../v1/V1_RECOLLECTION_20260910_REPORT.md)。这些数量只作回归参照，不能作为下一次实时采集的固定数量要求。
 
 V2 现有 1,362 条政府价格；品牌、标准商品、规格和匹配表为空是当前政府路径的实际结果，不是表结构无法支持设备。现有测试覆盖点时价格、来源版本切换、地区隔离、幂等、乱序、修订和事务，但没有五品牌原生 V2 闭环测试。
 
@@ -124,7 +126,7 @@ V2 现有 1,362 条政府价格；品牌、标准商品、规格和匹配表为�
 ### 5.1 稳定身份规则
 
 1. 型号标准键按品牌、官方来源和产品 ID 构造，不按容易变化的营销标题合并产品。保留当前配置族边界，不做跨平台去重。
-2. 官方 SKU ID 优先作为来源身份；小米没有可靠 SKU ID、Apple 只有配置容器时，继续以产品 ID 与可证明的完整规格组合标识，不能伪造官方编号。Apple 只有真实 `btrOrFdPartNumber` 才作为外部 SKU；仅有 `aosContainerPartNumber` 时必须具备完整显式 `processor/memory/storage` 配置，详细门禁见[连接器契约](V2_CONNECTOR_CONTRACT.md#3-稳定身份)。
+2. 官方 SKU ID 优先作为来源身份；小米没有可靠 SKU ID、Apple 只有配置容器时，继续以产品 ID 与可证明的完整规格组合标识，不能伪造官方编号。Apple 只有真实 `btrOrFdPartNumber` 才作为外部 SKU；仅有 `aosContainerPartNumber` 时必须具备完整显式 `processor/memory/storage` 配置，详细门禁见[连接器契约](../../V2_CONNECTOR_CONTRACT.md#3-稳定身份)。
 3. 标准 variant 键结合可证明的配置身份；规格真正变化时建立新 variant/revision，保留旧事实，不能用相同外部 SKU ID 覆盖旧配置。
 4. 复用已有身份指纹和唯一键机制，不增加新哈希链、版本注册中心或品牌专属表。Apple 的部件号和华为“版本、款式”等区分字段不能在转换中丢失。
 5. 不把平台 SKU 编号自动填入 GTIN 或制造商部件号。缺少内存等公开属性时允许明确缺失，不猜测参数。
@@ -170,7 +172,7 @@ V2 现有 1,362 条政府价格；品牌、标准商品、规格和匹配表为�
 | 事务与版本 | 产品级原子提交；可信规格变化切换 revision 并使旧规格当前投影失效，历史保留；不可信解析不切换版本 |
 | 锁与批次 | 沿用渠道/地区锁；补齐同范围过期 RUNNING 批次处理；异常、取消和崩溃恢复有确定终态，不操作其他来源批次 |
 
-阶段 M 的真实并发修复沿此边界实施：批次启动在已有来源/地区命名锁下移除冗余 `FOR UPDATE`；设备单产品持久化事务单独使用 `READ COMMITTED`，避免不同来源的空范围间隙锁互相阻塞，仍保留父 revision 锁、匹配当前读与唯一约束。归还连接后恢复默认隔离级别，不改变政府事务或全局环境；部署前置条件见[MySQL 兼容说明](MYSQL_57_COMPATIBILITY.md#22-设备并发写入的事务隔离)。
+阶段 M 的真实并发修复沿此边界实施：批次启动在已有来源/地区命名锁下移除冗余 `FOR UPDATE`；设备单产品持久化事务单独使用 `READ COMMITTED`，避免不同来源的空范围间隙锁互相阻塞，仍保留父 revision 锁、匹配当前读与唯一约束。归还连接后恢复默认隔离级别，不改变政府事务或全局环境；部署前置条件见[MySQL 兼容说明](../../MYSQL_57_COMPATIBILITY.md#3-设备事务隔离)。
 | 同时点与重建 | 同时点冲突不按最后插入覆盖；政府保留已验证的官方修订链，设备未确认冲突进入待复核/拒绝，不能留下第二条无修订关系的可信事实供重建任选；增量结果与 rebuild_current 必须一致 |
 
 这些机制对当前五品牌有实际调用方，不新增调度平台。政府数据不套用设备库存下架规则或机械的 30% 变价阈值，继续保持发布值口径。
